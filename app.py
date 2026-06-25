@@ -93,6 +93,7 @@ def init_db():
               market_price real,
               distress integer not null default 0,
               original_price real,
+              source_from text,
               description text,
               tg_media_file_id text,
               tg_media_kind text,
@@ -194,6 +195,7 @@ def init_db():
         ensure_column(conn, "projects", "tg_media_file_id", "text")
         ensure_column(conn, "projects", "tg_media_kind", "text")
         ensure_column(conn, "projects", "tg_media_signature", "text")
+        ensure_column(conn, "projects", "source_from", "text")
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
@@ -1310,7 +1312,7 @@ def dashboard(message=""):
     rows = "".join(
         f"""
         <tr>
-          <td><strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['district'])}, {escape(p['building'])}</span></td>
+          <td><strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['district'])}, {escape(p['building'])}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
           <td>{escape(p['rooms'])}</td>
           <td>{money(p['price'])} AED</td>
           <td><span class="status {escape(p['status'])}">{escape(p['status'])}</span></td>
@@ -1364,6 +1366,7 @@ def project_form(project=None, message=""):
         <label>Original price, AED<input type="number" step="1" name="original_price" value="{escape(p.get('original_price'))}"></label>
         <label>Distress<select name="distress"><option value="0" {selected(str(p.get('distress',0)),'0')}>Нет</option><option value="1" {selected(str(p.get('distress',0)),'1')}>Да</option></select></label>
         <label>Фото/видео<input type="file" name="media" multiple accept="image/*,video/*"></label>
+        <label class="wide">От кого<input name="source_from" value="{escape(p.get('source_from'))}" placeholder="Например: агент, собственник, партнёр"></label>
         <label class="wide">Дополнительное описание<textarea name="description">{escape(p.get('description'))}</textarea></label>
       </div>
       <p><button>{'Сохранить' if project else 'Добавить объект'}</button></p>
@@ -1552,6 +1555,7 @@ def save_project(form, project_id=None):
         "market_price": form_value(form, "market_price") or None,
         "distress": int(form_value(form, "distress", "0") or 0),
         "original_price": form_value(form, "original_price") or None,
+        "source_from": form_value(form, "source_from"),
         "description": form_value(form, "description"),
         "updated_at": iso_now(),
     }
@@ -1564,7 +1568,7 @@ def save_project(form, project_id=None):
                   rooms=:rooms, bathrooms=:bathrooms, floor_level=:floor_level, parking=:parking,
                   availability=:availability, furnishing=:furnishing, balcony=:balcony, area=:area,
                   price=:price, market_price=:market_price, distress=:distress, original_price=:original_price,
-                  description=:description, updated_at=:updated_at
+                  source_from=:source_from, description=:description, updated_at=:updated_at
                 where id=:id
                 """,
                 values,
@@ -1576,10 +1580,10 @@ def save_project(form, project_id=None):
                 """
                 insert into projects(title, category, district, building, rooms, bathrooms, floor_level,
                   parking, availability, furnishing, balcony, area, price, market_price, distress,
-                  original_price, description, created_at, updated_at)
+                  original_price, source_from, description, created_at, updated_at)
                 values(:title, :category, :district, :building, :rooms, :bathrooms, :floor_level,
                   :parking, :availability, :furnishing, :balcony, :area, :price, :market_price,
-                  :distress, :original_price, :description, :created_at, :updated_at)
+                  :distress, :original_price, :source_from, :description, :created_at, :updated_at)
                 """,
                 values,
             )
