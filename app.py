@@ -54,6 +54,23 @@ LEAD_STATUSES = [
     ("lost", "Неактуальна"),
 ]
 LEAD_STATUS_LABELS = dict(LEAD_STATUSES)
+EVENT_LABELS = {
+    "click_start_view": "Начал смотреть лоты",
+    "click_next": "Смотреть ещё",
+    "click_interest": "Хочу узнать подробнее",
+    "click_contact_tg": "Выбрал связь в Telegram",
+    "click_contact_phone": "Выбрал оставить телефон",
+    "click_contact_whatsapp": "Выбрал оставить WhatsApp",
+    "click_custom_interest": "Интерес к свободной рассылке",
+    "click_custom_tg": "Свободная рассылка: Telegram",
+    "click_custom_phone": "Свободная рассылка: телефон",
+    "click_custom_whatsapp": "Свободная рассылка: WhatsApp",
+    "click_personal_interest": "Заявка на персональный подбор",
+    "click_personal_tg": "Персональный подбор: Telegram",
+    "click_personal_phone": "Персональный подбор: телефон",
+    "click_personal_whatsapp": "Персональный подбор: WhatsApp",
+    "click_language": "Выбор языка",
+}
 
 
 def now_local():
@@ -201,6 +218,18 @@ def init_db():
               contact_method text,
               contact_value text,
               status text not null default 'new',
+              created_at text not null
+            );
+
+            create table if not exists bot_events (
+              id integer primary key autoincrement,
+              chat_id integer not null,
+              username text,
+              name text,
+              event_type text not null,
+              project_id integer,
+              broadcast_id integer,
+              payload text,
               created_at text not null
             );
             """
@@ -707,6 +736,26 @@ def mark_seen(chat_id, project_id):
         )
 
 
+def log_event(chat_id, user, event_type, project_id=None, broadcast_id=None, payload=None):
+    with db() as conn:
+        conn.execute(
+            """
+            insert into bot_events(chat_id, username, name, event_type, project_id, broadcast_id, payload, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                user.get("username") if user else None,
+                lead_name(user) if user else str(chat_id),
+                event_type,
+                project_id,
+                broadcast_id,
+                payload,
+                iso_now(),
+            ),
+        )
+
+
 def get_project(project_id):
     with db() as conn:
         return conn.execute("select * from projects where id = ?", (project_id,)).fetchone()
@@ -743,7 +792,7 @@ def next_project_for(chat_id, exclude_id=None):
         ).fetchone()
 
 
-def send_project(chat_id, project):
+def send_project(chat_id, project, user=None):
     if not project:
         send_no_projects_message(chat_id)
         return False
@@ -751,6 +800,7 @@ def send_project(chat_id, project):
     media = get_project_media(project["id"])
     send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"]))
     mark_seen(chat_id, project["id"])
+    log_event(chat_id, user or {}, "project_sent", project_id=project["id"])
     return True
 
 
@@ -915,7 +965,7 @@ def create_personal_lead(chat_id, user, method=None, value=None):
 
 def handle_start(chat_id, user):
     upsert_subscriber(user, chat_id)
-    send_project(chat_id, first_active_project())
+    send_project(chat_id, first_active_project(), user=user)
 
 
 def handle_text(message):
@@ -991,10 +1041,12 @@ def handle_callback(callback):
     telegram_api("answerCallbackQuery", {"callback_query_id": query_id})
 
     if data == "start_view":
-        send_project(chat_id, next_project_for(chat_id))
+        log_event(chat_id, user, "click_start_view", payload=data)
+        send_project(chat_id, next_project_for(chat_id), user=user)
         return
 
     if data == "personal_interest":
+        log_event(chat_id, user, "click_personal_interest", payload=data)
         keyboard = inline_keyboard(
             [
                 [{"text": "✈️ Написать в Telegram", "callback_data": "personal_tg"}],
@@ -1006,11 +1058,13 @@ def handle_callback(callback):
         return
 
     if data == "personal_tg":
+        log_event(chat_id, user, "click_personal_tg", payload=data)
         create_personal_lead(chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
         send_message(chat_id, "Спасибо. @roi_counter напишет вам в Telegram.")
         return
 
     if data == "personal_phone":
+        log_event(chat_id, user, "click_personal_phone", payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_personal_phone', state_project_id = null where chat_id = ?",
@@ -1021,6 +1075,7 @@ def handle_callback(callback):
         return
 
     if data == "personal_whatsapp":
+        log_event(chat_id, user, "click_personal_whatsapp", payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_personal_whatsapp', state_project_id = null where chat_id = ?",
@@ -1031,9 +1086,10 @@ def handle_callback(callback):
 
     action, _, raw_project_id = data.partition(":")
     if action == "lang" and raw_project_id in ("ru", "en"):
+        log_event(chat_id, user, "click_language", payload=data)
         with db() as conn:
             conn.execute("update subscribers set language = ? where chat_id = ?", (raw_project_id, chat_id))
-        send_project(chat_id, first_active_project())
+        send_project(chat_id, first_active_project(), user=user)
         return
 
     try:
@@ -1042,8 +1098,10 @@ def handle_callback(callback):
         project_id = None
 
     if action == "next":
-        send_project(chat_id, next_project_for(chat_id, exclude_id=project_id))
+        log_event(chat_id, user, "click_next", project_id=project_id, payload=data)
+        send_project(chat_id, next_project_for(chat_id, exclude_id=project_id), user=user)
     elif action == "custom_interest" and project_id:
+        log_event(chat_id, user, "click_custom_interest", broadcast_id=project_id, payload=data)
         keyboard = inline_keyboard(
             [
                 [{"text": "✈️ Написать в Telegram", "callback_data": f"custom_tg:{project_id}"}],
@@ -1053,9 +1111,11 @@ def handle_callback(callback):
         )
         send_message(chat_id, "Как вам удобнее, чтобы менеджер связался с вами?", keyboard=keyboard)
     elif action == "custom_tg" and project_id:
+        log_event(chat_id, user, "click_custom_tg", broadcast_id=project_id, payload=data)
         create_custom_broadcast_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
         send_message(chat_id, "Спасибо. Менеджер напишет вам в Telegram.")
     elif action == "custom_phone" and project_id:
+        log_event(chat_id, user, "click_custom_phone", broadcast_id=project_id, payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_custom_phone', state_project_id = ? where chat_id = ?",
@@ -1064,6 +1124,7 @@ def handle_callback(callback):
         keyboard = reply_keyboard([[{"text": "📞 Отправить телефон", "request_contact": True}]])
         send_message(chat_id, "Нажмите кнопку ниже, чтобы поделиться номером телефона.", keyboard=keyboard)
     elif action == "custom_whatsapp" and project_id:
+        log_event(chat_id, user, "click_custom_whatsapp", broadcast_id=project_id, payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_custom_whatsapp', state_project_id = ? where chat_id = ?",
@@ -1071,6 +1132,7 @@ def handle_callback(callback):
             )
         send_message(chat_id, "Напишите номер WhatsApp одним сообщением.")
     elif action in ("interest", "contact") and project_id:
+        log_event(chat_id, user, "click_interest", project_id=project_id, payload=data)
         keyboard = inline_keyboard(
             [
                 [{"text": "✈️ Написать в Telegram", "callback_data": f"contact_tg:{project_id}"}],
@@ -1080,9 +1142,11 @@ def handle_callback(callback):
         )
         send_message(chat_id, "Как вам удобнее, чтобы менеджер связался с вами?", keyboard=keyboard)
     elif action == "contact_tg" and project_id:
+        log_event(chat_id, user, "click_contact_tg", project_id=project_id, payload=data)
         create_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
         send_message(chat_id, "Спасибо. Менеджер напишет вам в Telegram.")
     elif action == "contact_phone" and project_id:
+        log_event(chat_id, user, "click_contact_phone", project_id=project_id, payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_phone', state_project_id = ? where chat_id = ?",
@@ -1091,6 +1155,7 @@ def handle_callback(callback):
         keyboard = reply_keyboard([[{"text": "Отправить телефон", "request_contact": True}]])
         send_message(chat_id, "Нажмите кнопку ниже, чтобы поделиться номером телефона.", keyboard=keyboard)
     elif action == "contact_whatsapp" and project_id:
+        log_event(chat_id, user, "click_contact_whatsapp", project_id=project_id, payload=data)
         with db() as conn:
             conn.execute(
                 "update subscribers set state = 'awaiting_whatsapp', state_project_id = ? where chat_id = ?",
@@ -1416,6 +1481,7 @@ def layout(title, content, active="projects", message=""):
         ("projects", "/", "Объекты"),
         ("new", "/project/new", "Добавить"),
         ("leads", "/leads", "Заявки"),
+        ("stats", "/stats", "Статистика"),
         ("broadcasts", "/broadcasts", "Рассылки"),
         ("subscribers", "/subscribers", "Подписчики"),
     ]
@@ -1544,6 +1610,137 @@ def dashboard(message=""):
     </table>
     """
     return layout("Объекты", content, "projects", message)
+
+
+def conversion(numerator, denominator):
+    if not denominator:
+        return "0%"
+    return f"{round(numerator / denominator * 100, 1)}%"
+
+
+def event_label(event_type):
+    return EVENT_LABELS.get(event_type, event_type)
+
+
+def statistics_page():
+    with db() as conn:
+        overview = {
+            "subscribers": conn.execute("select count(*) c from subscribers").fetchone()["c"],
+            "shows": conn.execute("select count(*) c from seen_projects").fetchone()["c"],
+            "clicks": conn.execute("select count(*) c from bot_events where event_type like 'click_%'").fetchone()["c"],
+            "lot_leads": conn.execute("select count(*) c from leads").fetchone()["c"],
+            "personal_leads": conn.execute("select count(*) c from personal_leads").fetchone()["c"],
+            "custom_leads": conn.execute("select count(*) c from custom_broadcast_leads").fetchone()["c"],
+        }
+        project_rows_data = conn.execute(
+            """
+            select
+              p.id,
+              p.title,
+              p.district,
+              p.building,
+              p.status,
+              count(distinct s.chat_id) shows,
+              count(distinct case when e.event_type like 'click_%' then e.id end) clicks,
+              count(distinct case when e.event_type = 'click_interest' then e.id end) interests,
+              count(distinct l.id) leads
+            from projects p
+            left join seen_projects s on s.project_id = p.id
+            left join bot_events e on e.project_id = p.id
+            left join leads l on l.project_id = p.id
+            group by p.id
+            order by p.status = 'active' desc, shows desc, leads desc, p.created_at desc
+            """
+        ).fetchall()
+        seen_rows_data = conn.execute(
+            """
+            select
+              s.seen_at,
+              p.title,
+              p.district,
+              coalesce(nullif(trim(coalesce(sub.first_name, '') || ' ' || coalesce(sub.last_name, '')), ''), sub.username, s.chat_id) client_name,
+              sub.username,
+              s.chat_id,
+              count(distinct e.id) clicks,
+              count(distinct l.id) leads
+            from seen_projects s
+            left join projects p on p.id = s.project_id
+            left join subscribers sub on sub.chat_id = s.chat_id
+            left join bot_events e on e.project_id = s.project_id and e.chat_id = s.chat_id and e.event_type like 'click_%'
+            left join leads l on l.project_id = s.project_id and l.chat_id = s.chat_id
+            group by s.chat_id, s.project_id
+            order by s.seen_at desc
+            limit 80
+            """
+        ).fetchall()
+        event_rows_data = conn.execute(
+            """
+            select event_type, count(*) c
+            from bot_events
+            where event_type like 'click_%'
+            group by event_type
+            order by c desc, event_type
+            """
+        ).fetchall()
+
+    total_leads = overview["lot_leads"] + overview["personal_leads"] + overview["custom_leads"]
+    project_rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{escape(row['title'])}</strong><br><span class="muted">{escape(row['district'])}, {escape(row['building'])}</span></td>
+          <td>{escape(row['status'])}</td>
+          <td>{row['shows']}</td>
+          <td>{row['clicks']}</td>
+          <td>{row['interests']}</td>
+          <td>{row['leads']}</td>
+          <td>{conversion(row['leads'], row['shows'])}</td>
+        </tr>
+        """
+        for row in project_rows_data
+    )
+    seen_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['seen_at'])}</td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span></td>
+          <td>{escape(row['title'] or 'Лот удалён')}<br><span class="muted">{escape(row['district'])}</span></td>
+          <td>{row['clicks']}</td>
+          <td>{row['leads']}</td>
+        </tr>
+        """
+        for row in seen_rows_data
+    )
+    event_rows = "".join(
+        f"<tr><td>{escape(event_label(row['event_type']))}<br><span class='muted'>{escape(row['event_type'])}</span></td><td>{row['c']}</td></tr>"
+        for row in event_rows_data
+    )
+    content = f"""
+    <section class="grid">
+      <div class="metric"><strong>{overview['subscribers']}</strong><span>подписчиков</span></div>
+      <div class="metric"><strong>{overview['shows']}</strong><span>показов лотов</span></div>
+      <div class="metric"><strong>{overview['clicks']}</strong><span>кликов по кнопкам</span></div>
+      <div class="metric"><strong>{total_leads}</strong><span>заявок всего</span></div>
+    </section>
+    <section class="grid">
+      <div class="metric"><strong>{overview['lot_leads']}</strong><span>заявок по лотам</span></div>
+      <div class="metric"><strong>{overview['personal_leads']}</strong><span>персональный подбор</span></div>
+      <div class="metric"><strong>{overview['custom_leads']}</strong><span>заявок по рассылкам</span></div>
+      <div class="metric"><strong>{conversion(overview['lot_leads'], overview['shows'])}</strong><span>конверсия показов в заявки</span></div>
+    </section>
+    <div class="panel">
+      <h2>Статистика по лотам</h2>
+      <table><thead><tr><th>Лот</th><th>Статус</th><th>Показы</th><th>Клики</th><th>Интерес</th><th>Заявки</th><th>Конверсия</th></tr></thead><tbody>{project_rows or '<tr><td colspan="7" class="muted">Данных пока нет.</td></tr>'}</tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Кто видел лоты</h2>
+      <table><thead><tr><th>Дата показа</th><th>Пользователь</th><th>Лот</th><th>Клики</th><th>Заявки</th></tr></thead><tbody>{seen_rows or '<tr><td colspan="5" class="muted">Показов пока нет.</td></tr>'}</tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Клики по действиям</h2>
+      <table><thead><tr><th>Действие</th><th>Клики</th></tr></thead><tbody>{event_rows or '<tr><td colspan="2" class="muted">Кликов пока нет.</td></tr>'}</tbody></table>
+    </div>
+    """
+    return layout("Статистика", content, "stats")
 
 
 def project_form(project=None, message=""):
@@ -1933,6 +2130,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(project_form(project) if project else dashboard("Объект не найден"))
         elif path == "/leads":
             self.send_html(leads_page())
+        elif path == "/stats":
+            self.send_html(statistics_page())
         elif path == "/broadcasts":
             self.send_html(broadcasts_page())
         elif path == "/subscribers":
