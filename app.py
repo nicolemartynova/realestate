@@ -190,6 +190,17 @@ def init_db():
               created_at text not null,
               foreign key(broadcast_id) references custom_broadcasts(id) on delete cascade
             );
+
+            create table if not exists personal_leads (
+              id integer primary key autoincrement,
+              chat_id integer not null,
+              username text,
+              name text,
+              contact_method text,
+              contact_value text,
+              status text not null default 'new',
+              created_at text not null
+            );
             """
         )
         ensure_column(conn, "projects", "tg_media_file_id", "text")
@@ -732,7 +743,7 @@ def next_project_for(chat_id, exclude_id=None):
 
 def send_project(chat_id, project):
     if not project:
-        send_message(chat_id, "Сейчас новых актуальных объектов нет. Как только появятся новые лоты, я пришлю их здесь.")
+        send_no_projects_message(chat_id)
         return False
     caption = project_caption(project)
     media = get_project_media(project["id"])
@@ -748,6 +759,19 @@ def project_actions_keyboard(project_id):
             [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
         ]
     )
+
+
+def send_no_projects_message(chat_id):
+    text = (
+        "Сейчас новых актуальных лотов нет.\n\n"
+        "Но мы можем сделать для вас персональный подбор недвижимости ниже рынка в Дубае: "
+        "подберём варианты под бюджет, район, цель покупки и желаемую доходность.\n\n"
+        "Оставьте заявку, и <a href=\"https://t.me/roi_counter\">@roi_counter</a> с вами свяжется."
+    )
+    keyboard = inline_keyboard(
+        [[{"text": "📝 Оставить заявку на подбор", "callback_data": "personal_interest"}]]
+    )
+    send_message(chat_id, text, keyboard=keyboard)
 
 
 def send_project_actions(chat_id, project_id):
@@ -857,6 +881,36 @@ def create_custom_broadcast_lead(broadcast_id, chat_id, user, method=None, value
     return lead_id
 
 
+def create_personal_lead(chat_id, user, method=None, value=None):
+    with db() as conn:
+        cur = conn.execute(
+            """
+            insert into personal_leads(chat_id, username, name, contact_method, contact_value, created_at)
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                user.get("username"),
+                lead_name(user),
+                method,
+                value,
+                iso_now(),
+            ),
+        )
+        lead_id = cur.lastrowid
+    notify_admin(
+        "\n".join(
+            [
+                "Новая заявка на персональный подбор",
+                f"Клиент: {lead_name(user)}",
+                f"Telegram: @{user.get('username')}" if user.get("username") else f"Chat ID: {chat_id}",
+                f"Контакт: {method or 'не выбран'} {value or ''}".strip(),
+            ]
+        )
+    )
+    return lead_id
+
+
 def handle_start(chat_id, user):
     upsert_subscriber(user, chat_id)
     send_project(chat_id, first_active_project())
@@ -874,20 +928,36 @@ def handle_text(message):
 
     with db() as conn:
         sub = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone()
-    if not sub or not sub["state_project_id"]:
+    if not sub:
         send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
         return
 
     project_id = sub["state_project_id"]
     if contact:
         value = contact.get("phone_number")
-        if sub["state"] == "awaiting_custom_phone":
+        if sub["state"] == "awaiting_custom_phone" and project_id:
             create_custom_broadcast_lead(project_id, chat_id, user, method="phone", value=value)
-        else:
+        elif sub["state"] == "awaiting_personal_phone":
+            create_personal_lead(chat_id, user, method="phone", value=value)
+        elif sub["state"] == "awaiting_phone" and project_id:
             create_lead(project_id, chat_id, user, method="phone", value=value)
+        else:
+            send_message(chat_id, "Выберите кнопку заявки под лотом или запросите персональный подбор.")
+            return
         with db() as conn:
             conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Спасибо, получили контакт. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+        send_message(chat_id, "Спасибо, получили контакт. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+        return
+
+    if sub["state"] == "awaiting_personal_whatsapp":
+        create_personal_lead(chat_id, user, method="whatsapp", value=text)
+        with db() as conn:
+            conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
+        send_message(chat_id, "Спасибо, получили WhatsApp. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+        return
+
+    if not sub["state_project_id"]:
+        send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
         return
 
     if sub["state"] == "awaiting_whatsapp":
@@ -920,6 +990,41 @@ def handle_callback(callback):
 
     if data == "start_view":
         send_project(chat_id, next_project_for(chat_id))
+        return
+
+    if data == "personal_interest":
+        keyboard = inline_keyboard(
+            [
+                [{"text": "✈️ Написать в Telegram", "callback_data": "personal_tg"}],
+                [{"text": "📞 Оставить телефон", "callback_data": "personal_phone"}],
+                [{"text": "🟢 Оставить WhatsApp", "callback_data": "personal_whatsapp"}],
+            ]
+        )
+        send_message(chat_id, "Как вам удобнее, чтобы @roi_counter связался с вами для персонального подбора?", keyboard=keyboard)
+        return
+
+    if data == "personal_tg":
+        create_personal_lead(chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
+        send_message(chat_id, "Спасибо. @roi_counter напишет вам в Telegram.")
+        return
+
+    if data == "personal_phone":
+        with db() as conn:
+            conn.execute(
+                "update subscribers set state = 'awaiting_personal_phone', state_project_id = null where chat_id = ?",
+                (chat_id,),
+            )
+        keyboard = reply_keyboard([[{"text": "📞 Отправить телефон", "request_contact": True}]])
+        send_message(chat_id, "Нажмите кнопку ниже, чтобы поделиться номером телефона.", keyboard=keyboard)
+        return
+
+    if data == "personal_whatsapp":
+        with db() as conn:
+            conn.execute(
+                "update subscribers set state = 'awaiting_personal_whatsapp', state_project_id = null where chat_id = ?",
+                (chat_id,),
+            )
+        send_message(chat_id, "Напишите номер WhatsApp одним сообщением.")
         return
 
     action, _, raw_project_id = data.partition(":")
@@ -1297,9 +1402,12 @@ textarea { min-height:110px; resize:vertical; }
 
 def stats():
     with db() as conn:
+        lot_leads = conn.execute("select count(*) c from leads").fetchone()["c"]
+        custom_leads = conn.execute("select count(*) c from custom_broadcast_leads").fetchone()["c"]
+        personal_leads = conn.execute("select count(*) c from personal_leads").fetchone()["c"]
         return {
             "active": conn.execute("select count(*) c from projects where status='active'").fetchone()["c"],
-            "leads": conn.execute("select count(*) c from leads").fetchone()["c"],
+            "leads": lot_leads + custom_leads + personal_leads,
             "subs": conn.execute("select count(*) c from subscribers").fetchone()["c"],
             "scheduled": conn.execute("select count(*) c from broadcasts where status='scheduled'").fetchone()["c"],
         }
@@ -1407,6 +1515,12 @@ def leads_page():
             order by l.created_at desc
             """
         ).fetchall()
+        personal_leads = conn.execute(
+            """
+            select * from personal_leads
+            order by created_at desc
+            """
+        ).fetchall()
     rows = "".join(
         f"""
         <tr>
@@ -1449,10 +1563,34 @@ def leads_page():
         """
         for l in custom_leads
     )
+    personal_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(l['created_at'])}</td>
+          <td><strong>{escape(l['name'])}</strong><br><span class='muted'>@{escape(l['username']) if l['username'] else escape(l['chat_id'])}</span></td>
+          <td>{escape(l['contact_method'])}<br>{escape(l['contact_value'])}</td>
+          <td>
+            <form method="post" action="/personal-lead/status" class="actions">
+              <input type="hidden" name="id" value="{l['id']}">
+              <select name="status">{lead_status_select(l['status'])}</select>
+              <button>Сохранить</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="/personal-lead/delete" class="inline"><input type="hidden" name="id" value="{l['id']}"><button class="danger">Удалить</button></form>
+          </td>
+        </tr>
+        """
+        for l in personal_leads
+    )
     empty = '<tr><td colspan="6" class="muted">Заявок пока нет.</td></tr>'
     return layout(
         "Заявки",
         f"""
+        <div class="panel">
+          <h2>Заявки на персональный подбор</h2>
+          <table><thead><tr><th>Дата</th><th>Клиент</th><th>Контакт</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{personal_rows or '<tr><td colspan="5" class="muted">Заявок на персональный подбор пока нет.</td></tr>'}</tbody></table>
+        </div>
         <div class="panel">
           <h2>Заявки по лотам</h2>
           <table><thead><tr><th>Дата</th><th>Клиент</th><th>Объект</th><th>Контакт</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{rows or empty}</tbody></table>
@@ -1778,6 +1916,18 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_form(self)
             with db() as conn:
                 conn.execute("delete from custom_broadcast_leads where id = ?", (form_value(form, "id"),))
+            self.redirect("/leads")
+        elif path == "/personal-lead/status":
+            form = parse_form(self)
+            status = form_value(form, "status")
+            if status in LEAD_STATUS_LABELS:
+                with db() as conn:
+                    conn.execute("update personal_leads set status = ? where id = ?", (status, form_value(form, "id")))
+            self.redirect("/leads")
+        elif path == "/personal-lead/delete":
+            form = parse_form(self)
+            with db() as conn:
+                conn.execute("delete from personal_leads where id = ?", (form_value(form, "id"),))
             self.redirect("/leads")
         elif path == "/broadcast/create":
             form = parse_form(self)
