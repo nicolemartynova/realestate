@@ -3,6 +3,7 @@ import cgi
 import hashlib
 import hmac
 import html
+import io
 import json
 import mimetypes
 import os
@@ -17,6 +18,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, time as dt_time, timedelta
 from http import cookies
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -1315,6 +1317,100 @@ def escape(value):
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def xlsx_cell_ref(row_index, col_index):
+    letters = ""
+    col = col_index
+    while col:
+        col, remainder = divmod(col - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return f"{letters}{row_index}"
+
+
+def xlsx_sheet_data(rows):
+    xml_rows = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = []
+        for col_index, value in enumerate(row, start=1):
+            cell_ref = xlsx_cell_ref(row_index, col_index)
+            text = html.escape("" if value is None else str(value), quote=False)
+            cells.append(f'<c r="{cell_ref}" t="inlineStr"><is><t>{text}</t></is></c>')
+        xml_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    return "".join(xml_rows)
+
+
+def build_active_projects_xlsx():
+    columns = [
+        ("id", "ID"),
+        ("title", "Лот"),
+        ("category", "Категория"),
+        ("district", "Район"),
+        ("building", "Название здания"),
+        ("rooms", "Комнаты"),
+        ("bathrooms", "Санузлы"),
+        ("floor_level", "Этаж"),
+        ("parking", "Парковка"),
+        ("availability", "Статус"),
+        ("furnishing", "Меблировка"),
+        ("balcony", "Балкон"),
+        ("area", "Площадь"),
+        ("price", "Цена, AED"),
+        ("market_price", "Средняя цена рынка, AED"),
+        ("distress", "Distress"),
+        ("original_price", "Original price, AED"),
+        ("description", "Дополнительное описание"),
+        ("created_at", "Создан"),
+        ("updated_at", "Обновлён"),
+    ]
+    with db() as conn:
+        projects = conn.execute(
+            "select * from projects where status = 'active' order by created_at asc, id asc"
+        ).fetchall()
+
+    rows = [[label for _, label in columns]]
+    for project in projects:
+        row = []
+        for key, _ in columns:
+            value = project[key]
+            if key == "distress":
+                value = "Да" if value else "Нет"
+            row.append(value)
+        rows.append(row)
+
+    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cols>{''.join(f'<col min="{i}" max="{i}" width="22" customWidth="1"/>' for i in range(1, len(columns) + 1))}</cols>
+  <sheetData>{xlsx_sheet_data(rows)}</sheetData>
+</worksheet>"""
+    workbook_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Актуальные лоты" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"""
+    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"""
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return buffer.getvalue()
+
+
 def layout(title, content, active="projects", message=""):
     nav = [
         ("projects", "/", "Объекты"),
@@ -1441,6 +1537,7 @@ def dashboard(message=""):
       <div class="metric"><strong>{s['subs']}</strong><span>подписчиков</span></div>
       <div class="metric"><strong>{s['scheduled']}</strong><span>запланировано</span></div>
     </section>
+    <p class="actions"><a class="button secondary" href="/projects/export.xlsx">Выгрузить актуальные лоты в Excel</a></p>
     <table>
       <thead><tr><th>Объект</th><th>Комнаты</th><th>Цена</th><th>Статус</th><th>Действия</th></tr></thead>
       <tbody>{rows or '<tr><td colspan="5" class="muted">Пока нет объектов.</td></tr>'}</tbody>
@@ -1779,6 +1876,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def send_bytes(self, data, content_type, filename):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(data)
+
     def redirect(self, location):
         self.send_response(303)
         self.send_header("Location", location)
@@ -1814,6 +1919,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif path == "/":
             self.send_html(dashboard())
+        elif path == "/projects/export.xlsx":
+            filename = f"active_lots_{now_local().strftime('%Y-%m-%d')}.xlsx"
+            self.send_bytes(
+                build_active_projects_xlsx(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename,
+            )
         elif path == "/project/new":
             self.send_html(project_form())
         elif path == "/project/edit":
