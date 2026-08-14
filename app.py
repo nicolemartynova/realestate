@@ -41,6 +41,8 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 TIMEZONE_OFFSET = int(os.environ.get("TIMEZONE_OFFSET", "4"))
+PERF_LOG_ENABLED = os.environ.get("PERF_LOG_ENABLED", "1") != "0"
+PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
@@ -87,6 +89,16 @@ def iso_start_of_day(moment):
 
 def iso_next_day(moment):
     return (moment.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).isoformat()
+
+
+def log_perf(label, started_at, **fields):
+    if not PERF_LOG_ENABLED:
+        return
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    if elapsed_ms < PERF_SLOW_MS:
+        return
+    details = " ".join(f"{key}={value}" for key, value in fields.items() if value not in (None, ""))
+    print(f"PERF {label} elapsed_ms={elapsed_ms} {details}".rstrip(), file=sys.stderr)
 
 
 def db():
@@ -332,6 +344,7 @@ def verify_signature(signed):
 def telegram_api(method, payload):
     if not BOT_TOKEN:
         return None
+    started_at = time.perf_counter()
     body = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
@@ -340,8 +353,12 @@ def telegram_api(method, payload):
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as res:
-            return json.loads(res.read().decode())
+            result = json.loads(res.read().decode())
+            if method != "getUpdates":
+                log_perf("telegram_api", started_at, method=method, ok=result.get("ok"))
+            return result
     except Exception:
+        log_perf("telegram_api_error", started_at, method=method)
         traceback.print_exc()
         return None
 
@@ -357,6 +374,7 @@ def telegram_api_multipart(method, fields, file_field, file_path, mime_type):
 def telegram_api_multipart_files(method, fields, files):
     if not BOT_TOKEN:
         return None
+    started_at = time.perf_counter()
     boundary = "----tgRealtyBoundary" + secrets.token_hex(12)
     body = bytearray()
 
@@ -387,8 +405,11 @@ def telegram_api_multipart_files(method, fields, files):
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as res:
-            return json.loads(res.read().decode())
+            result = json.loads(res.read().decode())
+            log_perf("telegram_api_multipart", started_at, method=method, ok=result.get("ok"), files=len(files), bytes=len(body))
+            return result
     except urllib.error.HTTPError as err:
+        log_perf("telegram_api_multipart_http_error", started_at, method=method, files=len(files), bytes=len(body))
         try:
             print(err.read().decode(), file=sys.stderr)
         except Exception:
@@ -396,6 +417,7 @@ def telegram_api_multipart_files(method, fields, files):
         traceback.print_exc()
         return None
     except Exception:
+        log_perf("telegram_api_multipart_error", started_at, method=method, files=len(files), bytes=len(body))
         traceback.print_exc()
         return None
 
@@ -542,6 +564,7 @@ def is_supported_collage_image(row):
 
 
 def build_photo_collage(project_id, media_rows):
+    started_at = time.perf_counter()
     image_rows = [
         row
         for row in media_rows
@@ -590,6 +613,7 @@ def build_photo_collage(project_id, media_rows):
     add_collage_watermark(canvas, Image, ImageDraw, ImageFont)
 
     canvas.save(output_path, "JPEG", quality=82, optimize=True)
+    log_perf("build_photo_collage", started_at, project_id=project_id, images=len(selected), bytes=output_path.stat().st_size)
     return output_path
 
 
@@ -626,6 +650,7 @@ def add_collage_watermark(canvas, image, image_draw, image_font):
 
 
 def send_project_card(chat_id, project, media_rows, caption, keyboard):
+    started_at = time.perf_counter()
     project_data = dict(project)
     signature = project_media_signature(media_rows)
     cached_file_id = project_data.get("tg_media_file_id")
@@ -644,6 +669,7 @@ def send_project_card(chat_id, project, media_rows, caption, keyboard):
             },
         )
         if result and result.get("ok"):
+            log_perf("send_project_card", started_at, project_id=project["id"], mode=f"cached_{cached_kind}", media=len(media_rows))
             return result
 
     image_rows = [
@@ -667,6 +693,7 @@ def send_project_card(chat_id, project, media_rows, caption, keyboard):
                 "image/jpeg",
             )
             cache_project_media_file_id(project["id"], signature, "photo", result)
+            log_perf("send_project_card", started_at, project_id=project["id"], mode="collage", media=len(media_rows), ok=result.get("ok") if result else False)
             return result
     if media_rows:
         first_supported = next(
@@ -682,8 +709,11 @@ def send_project_card(chat_id, project, media_rows, caption, keyboard):
             result = send_media_with_caption(chat_id, first_supported, caption, keyboard)
             kind = "video" if first_supported["mime_type"].startswith("video/") else "photo"
             cache_project_media_file_id(project["id"], signature, kind, result)
+            log_perf("send_project_card", started_at, project_id=project["id"], mode=f"single_{kind}", media=len(media_rows), ok=result.get("ok") if result else False)
             return result
-    return send_message(chat_id, caption, keyboard=keyboard)
+    result = send_message(chat_id, caption, keyboard=keyboard)
+    log_perf("send_project_card", started_at, project_id=project["id"], mode="text", media=len(media_rows), ok=result.get("ok") if result else False)
+    return result
 
 
 def project_media_signature(media_rows):
@@ -801,14 +831,17 @@ def next_project_for(chat_id, exclude_id=None):
 
 
 def send_project(chat_id, project, user=None):
+    started_at = time.perf_counter()
     if not project:
         send_no_projects_message(chat_id)
+        log_perf("send_project", started_at, chat_id=chat_id, project_id="none")
         return False
     caption = project_caption(project)
     media = get_project_media(project["id"])
     send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"]))
     mark_seen(chat_id, project["id"])
     log_event(chat_id, user or {}, "project_sent", project_id=project["id"])
+    log_perf("send_project", started_at, chat_id=chat_id, project_id=project["id"], media=len(media))
     return True
 
 
@@ -839,8 +872,12 @@ def send_project_actions(chat_id, project_id):
 
 
 def notify_admin(text):
+    started_at = time.perf_counter()
+    count = 0
     for chat_id in [item.strip() for item in ADMIN_CHAT_ID.split(",") if item.strip()]:
         send_message(chat_id, text)
+        count += 1
+    log_perf("notify_admin", started_at, admins=count)
 
 
 def upsert_subscriber(user, chat_id):
@@ -988,67 +1025,82 @@ def handle_start(chat_id, user):
 
 
 def handle_text(message):
+    started_at = time.perf_counter()
     chat_id = message["chat"]["id"]
     user = message.get("from", {})
     text = message.get("text", "")
     contact = message.get("contact")
-    upsert_subscriber(user, chat_id)
-    if text == "/start":
-        handle_start(chat_id, user)
-        return
-
-    with db() as conn:
-        sub = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone()
-    if not sub:
-        send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
-        return
-
-    project_id = sub["state_project_id"]
-    if contact:
-        value = contact.get("phone_number")
-        if sub["state"] == "awaiting_custom_phone" and project_id:
-            create_custom_broadcast_lead(project_id, chat_id, user, method="phone", value=value)
-        elif sub["state"] == "awaiting_personal_phone":
-            create_personal_lead(chat_id, user, method="phone", value=value)
-        elif sub["state"] == "awaiting_phone" and project_id:
-            create_lead(project_id, chat_id, user, method="phone", value=value)
-        else:
-            send_message(chat_id, "Выберите кнопку заявки под лотом или запросите персональный подбор.")
+    try:
+        upsert_subscriber(user, chat_id)
+        if text == "/start":
+            handle_start(chat_id, user)
             return
+
         with db() as conn:
-            conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Спасибо, получили контакт. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
-        return
+            sub = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone()
+        if not sub:
+            send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
+            return
 
-    if sub["state"] == "awaiting_personal_whatsapp":
-        create_personal_lead(chat_id, user, method="whatsapp", value=text)
-        with db() as conn:
-            conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Спасибо, получили WhatsApp. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
-        return
+        project_id = sub["state_project_id"]
+        if contact:
+            value = contact.get("phone_number")
+            if sub["state"] == "awaiting_custom_phone" and project_id:
+                create_custom_broadcast_lead(project_id, chat_id, user, method="phone", value=value)
+            elif sub["state"] == "awaiting_personal_phone":
+                create_personal_lead(chat_id, user, method="phone", value=value)
+            elif sub["state"] == "awaiting_phone" and project_id:
+                create_lead(project_id, chat_id, user, method="phone", value=value)
+            else:
+                send_message(chat_id, "Выберите кнопку заявки под лотом или запросите персональный подбор.")
+                return
+            with db() as conn:
+                conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
+            send_message(chat_id, "Спасибо, получили контакт. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            return
 
-    if not sub["state_project_id"]:
-        send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
-        return
+        if sub["state"] == "awaiting_personal_whatsapp":
+            create_personal_lead(chat_id, user, method="whatsapp", value=text)
+            with db() as conn:
+                conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
+            send_message(chat_id, "Спасибо, получили WhatsApp. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            return
 
-    if sub["state"] == "awaiting_whatsapp":
-        create_lead(project_id, chat_id, user, method="whatsapp", value=text)
-        with db() as conn:
-            conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
-        return
+        if not sub["state_project_id"]:
+            send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
+            return
 
-    if sub["state"] == "awaiting_custom_whatsapp":
-        create_custom_broadcast_lead(project_id, chat_id, user, method="whatsapp", value=text)
-        with db() as conn:
-            conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
-        return
+        if sub["state"] == "awaiting_whatsapp":
+            create_lead(project_id, chat_id, user, method="whatsapp", value=text)
+            with db() as conn:
+                conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
+            send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            return
 
-    send_message(chat_id, "Получил сообщение. Если хотите оставить заявку, выберите способ связи под объектом.")
+        if sub["state"] == "awaiting_custom_whatsapp":
+            create_custom_broadcast_lead(project_id, chat_id, user, method="whatsapp", value=text)
+            with db() as conn:
+                conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
+            send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            return
+
+        send_message(chat_id, "Получил сообщение. Если хотите оставить заявку, выберите способ связи под объектом.")
+    finally:
+        log_perf("handle_text", started_at, chat_id=chat_id, has_contact=bool(contact), command=text[:24] if text.startswith("/") else "")
 
 
 def handle_callback(callback):
+    started_at = time.perf_counter()
+    data = callback.get("data", "")
+    message = callback.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    try:
+        return handle_callback_inner(callback)
+    finally:
+        log_perf("handle_callback", started_at, chat_id=chat_id, data=data[:80])
+
+
+def handle_callback_inner(callback):
     query_id = callback["id"]
     data = callback.get("data", "")
     message = callback.get("message", {})
@@ -1218,6 +1270,7 @@ def bot_loop(stop_event):
 
 
 def send_to_all(project_id):
+    started_at = time.perf_counter()
     project = get_project(project_id)
     if not project:
         return 0
@@ -1228,6 +1281,7 @@ def send_to_all(project_id):
         if send_project(sub["chat_id"], project):
             count += 1
             time.sleep(0.05)
+    log_perf("send_to_all", started_at, project_id=project_id, subscribers=len(subscribers), sent=count)
     return count
 
 
@@ -1238,6 +1292,7 @@ def custom_broadcast_keyboard(broadcast_id):
 
 
 def send_custom_to_all(broadcast_id, text, media_items):
+    started_at = time.perf_counter()
     count = 0
     safe_text = html.escape(text)
     with db() as conn:
@@ -1277,6 +1332,7 @@ def send_custom_to_all(broadcast_id, text, media_items):
         if sent:
             count += 1
         time.sleep(0.05)
+    log_perf("send_custom_to_all", started_at, broadcast_id=broadcast_id, subscribers=len(subscribers), sent=count, media=len(media_items))
     return count
 
 
