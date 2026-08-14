@@ -81,6 +81,14 @@ def iso_now():
     return now_local().replace(microsecond=0).isoformat()
 
 
+def iso_start_of_day(moment):
+    return moment.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def iso_next_day(moment):
+    return (moment.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).isoformat()
+
+
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -837,6 +845,7 @@ def notify_admin(text):
 
 def upsert_subscriber(user, chat_id):
     with db() as conn:
+        existing = conn.execute("select chat_id from subscribers where chat_id = ?", (chat_id,)).fetchone()
         conn.execute(
             """
             insert into subscribers(chat_id, username, first_name, last_name, subscribed_at, last_seen_at)
@@ -855,6 +864,16 @@ def upsert_subscriber(user, chat_id):
                 iso_now(),
                 iso_now(),
             ),
+        )
+    if not existing:
+        notify_admin(
+            "\n".join(
+                [
+                    "Новый подписчик",
+                    f"Клиент: {lead_name(user)}",
+                    f"Telegram: @{user.get('username')}" if user.get("username") else f"Chat ID: {chat_id}",
+                ]
+            )
         )
 
 
@@ -1099,7 +1118,18 @@ def handle_callback(callback):
 
     if action == "next":
         log_event(chat_id, user, "click_next", project_id=project_id, payload=data)
-        send_project(chat_id, next_project_for(chat_id, exclude_id=project_id), user=user)
+        next_project = next_project_for(chat_id, exclude_id=project_id)
+        notify_admin(
+            "\n".join(
+                [
+                    "Клик «Смотреть еще»",
+                    f"Клиент: {lead_name(user)}",
+                    f"Telegram: @{user.get('username')}" if user.get("username") else f"Chat ID: {chat_id}",
+                    f"Следующий лот: {next_project['title'] if next_project else 'актуальных лотов больше нет'}",
+                ]
+            )
+        )
+        send_project(chat_id, next_project, user=user)
     elif action == "custom_interest" and project_id:
         log_event(chat_id, user, "click_custom_interest", broadcast_id=project_id, payload=data)
         keyboard = inline_keyboard(
@@ -1403,6 +1433,60 @@ def xlsx_sheet_data(rows):
     return "".join(xml_rows)
 
 
+def build_xlsx_package(sheets):
+    sheet_parts = []
+    workbook_sheets = []
+    workbook_relationships = []
+    content_overrides = [
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    ]
+    for index, (sheet_name, rows) in enumerate(sheets, start=1):
+        col_count = max((len(row) for row in rows), default=1)
+        safe_sheet_name = html.escape(sheet_name[:31], quote=True)
+        sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cols>{''.join(f'<col min="{i}" max="{i}" width="22" customWidth="1"/>' for i in range(1, col_count + 1))}</cols>
+  <sheetData>{xlsx_sheet_data(rows)}</sheetData>
+</worksheet>"""
+        sheet_parts.append((f"xl/worksheets/sheet{index}.xml", sheet_xml))
+        workbook_sheets.append(f'<sheet name="{safe_sheet_name}" sheetId="{index}" r:id="rId{index}"/>')
+        workbook_relationships.append(
+            f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
+        )
+        content_overrides.append(
+            f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+
+    workbook_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>{''.join(workbook_sheets)}</sheets>
+</workbook>"""
+    workbook_rels = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  {''.join(workbook_relationships)}
+</Relationships>"""
+    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    content_types = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  {''.join(content_overrides)}
+</Types>"""
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        for path, xml in sheet_parts:
+            archive.writestr(path, xml)
+    return buffer.getvalue()
+
+
 def build_active_projects_xlsx():
     columns = [
         ("id", "ID"),
@@ -1441,39 +1525,7 @@ def build_active_projects_xlsx():
             row.append(value)
         rows.append(row)
 
-    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <cols>{''.join(f'<col min="{i}" max="{i}" width="22" customWidth="1"/>' for i in range(1, len(columns) + 1))}</cols>
-  <sheetData>{xlsx_sheet_data(rows)}</sheetData>
-</worksheet>"""
-    workbook_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Актуальные лоты" sheetId="1" r:id="rId1"/></sheets>
-</workbook>"""
-    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-</Relationships>"""
-    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>"""
-    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>"""
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", content_types)
-        archive.writestr("_rels/.rels", root_rels)
-        archive.writestr("xl/workbook.xml", workbook_xml)
-        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
-        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
-    return buffer.getvalue()
+    return build_xlsx_package([("Актуальные лоты", rows)])
 
 
 def layout(title, content, active="projects", message=""):
@@ -1538,6 +1590,8 @@ h1 { margin:0; font-size:28px; letter-spacing:0; }
 .metric span { color:var(--muted); }
 .panel { padding:18px; margin-bottom:18px; }
 table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.table-scroll { width:100%; overflow:auto; }
+.table-scroll table { min-width:760px; }
 th,td { text-align:left; padding:12px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-size:12px; font-weight:700; background:#fafbf9; }
 tr:last-child td { border-bottom:0; }
@@ -1622,18 +1676,101 @@ def event_label(event_type):
     return EVENT_LABELS.get(event_type, event_type)
 
 
-def statistics_page():
+def period_condition(column, start_at=None, end_at=None):
+    clauses = []
+    params = []
+    if start_at:
+        clauses.append(f"{column} >= ?")
+        params.append(start_at)
+    if end_at:
+        clauses.append(f"{column} < ?")
+        params.append(end_at)
+    return (" and " + " and ".join(clauses) if clauses else "", params)
+
+
+def parse_stats_period(query):
+    period = query.get("period", ["all"])[0] or "all"
+    today = now_local()
+    date_from = query.get("date_from", [""])[0]
+    date_to = query.get("date_to", [""])[0]
+    start_at = None
+    end_at = None
+    label = "За всё время"
+
+    if period == "today":
+        start_at = iso_start_of_day(today)
+        end_at = iso_next_day(today)
+        label = "Сегодня"
+    elif period == "7d":
+        start_at = (today - timedelta(days=7)).replace(microsecond=0).isoformat()
+        end_at = today.replace(microsecond=0).isoformat()
+        label = "Последние 7 дней"
+    elif period == "30d":
+        start_at = (today - timedelta(days=30)).replace(microsecond=0).isoformat()
+        end_at = today.replace(microsecond=0).isoformat()
+        label = "Последние 30 дней"
+    elif period == "custom":
+        try:
+            if date_from:
+                start_at = datetime.fromisoformat(date_from).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            if date_to:
+                end_at = (datetime.fromisoformat(date_to).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).isoformat()
+            if date_from and date_to:
+                label = f"{date_from} — {date_to}"
+            elif date_from:
+                label = f"С {date_from}"
+            elif date_to:
+                label = f"До {date_to}"
+            else:
+                label = "Произвольный период"
+        except ValueError:
+            period = "all"
+            date_from = ""
+            date_to = ""
+            label = "За всё время"
+
+    return {
+        "period": period,
+        "date_from": date_from,
+        "date_to": date_to,
+        "start_at": start_at,
+        "end_at": end_at,
+        "label": label,
+    }
+
+
+def period_query(period):
+    params = {"period": period["period"]}
+    if period["date_from"]:
+        params["date_from"] = period["date_from"]
+    if period["date_to"]:
+        params["date_to"] = period["date_to"]
+    return urllib.parse.urlencode(params)
+
+
+def get_statistics_data(period):
+    start_at = period["start_at"]
+    end_at = period["end_at"]
+    seen_filter, seen_params = period_condition("seen_at", start_at, end_at)
+    event_filter, event_params = period_condition("created_at", start_at, end_at)
+    lead_filter, lead_params = period_condition("created_at", start_at, end_at)
+    subscriber_filter, subscriber_params = period_condition("subscribed_at", start_at, end_at)
+    seen_join, seen_join_params = period_condition("s.seen_at", start_at, end_at)
+    event_join, event_join_params = period_condition("e.created_at", start_at, end_at)
+    lead_join, lead_join_params = period_condition("l.created_at", start_at, end_at)
+
     with db() as conn:
         overview = {
             "subscribers": conn.execute("select count(*) c from subscribers").fetchone()["c"],
-            "shows": conn.execute("select count(*) c from seen_projects").fetchone()["c"],
-            "clicks": conn.execute("select count(*) c from bot_events where event_type like 'click_%'").fetchone()["c"],
-            "lot_leads": conn.execute("select count(*) c from leads").fetchone()["c"],
-            "personal_leads": conn.execute("select count(*) c from personal_leads").fetchone()["c"],
-            "custom_leads": conn.execute("select count(*) c from custom_broadcast_leads").fetchone()["c"],
+            "new_subscribers": conn.execute(f"select count(*) c from subscribers where 1=1{subscriber_filter}", subscriber_params).fetchone()["c"],
+            "shows": conn.execute(f"select count(*) c from seen_projects where 1=1{seen_filter}", seen_params).fetchone()["c"],
+            "clicks": conn.execute(f"select count(*) c from bot_events where event_type like 'click_%'{event_filter}", event_params).fetchone()["c"],
+            "lot_leads": conn.execute(f"select count(*) c from leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
+            "personal_leads": conn.execute(f"select count(*) c from personal_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
+            "custom_leads": conn.execute(f"select count(*) c from custom_broadcast_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
         }
         project_rows_data = conn.execute(
-            """
+            f"""
             select
               p.id,
               p.title,
@@ -1645,15 +1782,16 @@ def statistics_page():
               count(distinct case when e.event_type = 'click_interest' then e.id end) interests,
               count(distinct l.id) leads
             from projects p
-            left join seen_projects s on s.project_id = p.id
-            left join bot_events e on e.project_id = p.id
-            left join leads l on l.project_id = p.id
+            left join seen_projects s on s.project_id = p.id{seen_join}
+            left join bot_events e on e.project_id = p.id{event_join}
+            left join leads l on l.project_id = p.id{lead_join}
             group by p.id
             order by p.status = 'active' desc, shows desc, leads desc, p.created_at desc
-            """
+            """,
+            seen_join_params + event_join_params + lead_join_params,
         ).fetchall()
         seen_rows_data = conn.execute(
-            """
+            f"""
             select
               s.seen_at,
               p.title,
@@ -1666,23 +1804,38 @@ def statistics_page():
             from seen_projects s
             left join projects p on p.id = s.project_id
             left join subscribers sub on sub.chat_id = s.chat_id
-            left join bot_events e on e.project_id = s.project_id and e.chat_id = s.chat_id and e.event_type like 'click_%'
-            left join leads l on l.project_id = s.project_id and l.chat_id = s.chat_id
+            left join bot_events e on e.project_id = s.project_id and e.chat_id = s.chat_id and e.event_type like 'click_%'{event_join}
+            left join leads l on l.project_id = s.project_id and l.chat_id = s.chat_id{lead_join}
+            where 1=1{seen_filter}
             group by s.chat_id, s.project_id
             order by s.seen_at desc
             limit 80
-            """
+            """,
+            event_join_params + lead_join_params + seen_params,
         ).fetchall()
         event_rows_data = conn.execute(
-            """
+            f"""
             select event_type, count(*) c
             from bot_events
-            where event_type like 'click_%'
+            where event_type like 'click_%'{event_filter}
             group by event_type
             order by c desc, event_type
-            """
+            """,
+            event_params,
         ).fetchall()
 
+    return {
+        "overview": overview,
+        "project_rows": project_rows_data,
+        "seen_rows": seen_rows_data,
+        "event_rows": event_rows_data,
+    }
+
+
+def statistics_page(query=None):
+    period = parse_stats_period(query or {})
+    data = get_statistics_data(period)
+    overview = data["overview"]
     total_leads = overview["lot_leads"] + overview["personal_leads"] + overview["custom_leads"]
     project_rows = "".join(
         f"""
@@ -1696,7 +1849,7 @@ def statistics_page():
           <td>{conversion(row['leads'], row['shows'])}</td>
         </tr>
         """
-        for row in project_rows_data
+        for row in data["project_rows"]
     )
     seen_rows = "".join(
         f"""
@@ -1708,39 +1861,120 @@ def statistics_page():
           <td>{row['leads']}</td>
         </tr>
         """
-        for row in seen_rows_data
+        for row in data["seen_rows"]
     )
     event_rows = "".join(
         f"<tr><td>{escape(event_label(row['event_type']))}<br><span class='muted'>{escape(row['event_type'])}</span></td><td>{row['c']}</td></tr>"
-        for row in event_rows_data
+        for row in data["event_rows"]
     )
+    export_query = period_query(period)
     content = f"""
+    <form class="panel" method="get" action="/stats">
+      <h2>Период</h2>
+      <div class="form-grid">
+        <label>Период<select name="period">
+          <option value="all" {selected(period['period'], 'all')}>За всё время</option>
+          <option value="today" {selected(period['period'], 'today')}>Сегодня</option>
+          <option value="7d" {selected(period['period'], '7d')}>Последние 7 дней</option>
+          <option value="30d" {selected(period['period'], '30d')}>Последние 30 дней</option>
+          <option value="custom" {selected(period['period'], 'custom')}>Произвольный период</option>
+        </select></label>
+        <label>С даты<input type="date" name="date_from" value="{escape(period['date_from'])}"></label>
+        <label>По дату<input type="date" name="date_to" value="{escape(period['date_to'])}"></label>
+      </div>
+      <p class="actions">
+        <button>Показать</button>
+        <a class="button secondary" href="/stats/export.xlsx?{escape(export_query)}">Выгрузить статистику в Excel</a>
+      </p>
+      <p class="muted">Текущий период: {escape(period['label'])}</p>
+    </form>
     <section class="grid">
       <div class="metric"><strong>{overview['subscribers']}</strong><span>подписчиков</span></div>
+      <div class="metric"><strong>{overview['new_subscribers']}</strong><span>новых за период</span></div>
       <div class="metric"><strong>{overview['shows']}</strong><span>показов лотов</span></div>
       <div class="metric"><strong>{overview['clicks']}</strong><span>кликов по кнопкам</span></div>
-      <div class="metric"><strong>{total_leads}</strong><span>заявок всего</span></div>
     </section>
     <section class="grid">
+      <div class="metric"><strong>{total_leads}</strong><span>заявок всего</span></div>
       <div class="metric"><strong>{overview['lot_leads']}</strong><span>заявок по лотам</span></div>
       <div class="metric"><strong>{overview['personal_leads']}</strong><span>персональный подбор</span></div>
       <div class="metric"><strong>{overview['custom_leads']}</strong><span>заявок по рассылкам</span></div>
+    </section>
+    <section class="grid">
       <div class="metric"><strong>{conversion(overview['lot_leads'], overview['shows'])}</strong><span>конверсия показов в заявки</span></div>
     </section>
     <div class="panel">
       <h2>Статистика по лотам</h2>
-      <table><thead><tr><th>Лот</th><th>Статус</th><th>Показы</th><th>Клики</th><th>Интерес</th><th>Заявки</th><th>Конверсия</th></tr></thead><tbody>{project_rows or '<tr><td colspan="7" class="muted">Данных пока нет.</td></tr>'}</tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>Показы</th><th>Клики</th><th>Интерес</th><th>Заявки</th><th>Конверсия</th></tr></thead><tbody>{project_rows or '<tr><td colspan="7" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Кто видел лоты</h2>
-      <table><thead><tr><th>Дата показа</th><th>Пользователь</th><th>Лот</th><th>Клики</th><th>Заявки</th></tr></thead><tbody>{seen_rows or '<tr><td colspan="5" class="muted">Показов пока нет.</td></tr>'}</tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>Дата показа</th><th>Пользователь</th><th>Лот</th><th>Клики</th><th>Заявки</th></tr></thead><tbody>{seen_rows or '<tr><td colspan="5" class="muted">Показов пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Клики по действиям</h2>
-      <table><thead><tr><th>Действие</th><th>Клики</th></tr></thead><tbody>{event_rows or '<tr><td colspan="2" class="muted">Кликов пока нет.</td></tr>'}</tbody></table>
+      <div class="table-scroll"><table><thead><tr><th>Действие</th><th>Клики</th></tr></thead><tbody>{event_rows or '<tr><td colspan="2" class="muted">Кликов пока нет.</td></tr>'}</tbody></table></div>
     </div>
     """
     return layout("Статистика", content, "stats")
+
+
+def build_statistics_xlsx(period):
+    data = get_statistics_data(period)
+    overview = data["overview"]
+    total_leads = overview["lot_leads"] + overview["personal_leads"] + overview["custom_leads"]
+    overview_rows = [
+        ["Период", period["label"]],
+        ["Подписчиков всего", overview["subscribers"]],
+        ["Новых подписчиков за период", overview["new_subscribers"]],
+        ["Показов лотов", overview["shows"]],
+        ["Кликов по кнопкам", overview["clicks"]],
+        ["Заявок всего", total_leads],
+        ["Заявок по лотам", overview["lot_leads"]],
+        ["Заявок на персональный подбор", overview["personal_leads"]],
+        ["Заявок по свободным рассылкам", overview["custom_leads"]],
+        ["Конверсия показов в заявки", conversion(overview["lot_leads"], overview["shows"])],
+    ]
+    project_rows = [["Лот", "Район", "Здание", "Статус", "Показы", "Клики", "Интерес", "Заявки", "Конверсия"]]
+    for row in data["project_rows"]:
+        project_rows.append(
+            [
+                row["title"],
+                row["district"],
+                row["building"],
+                row["status"],
+                row["shows"],
+                row["clicks"],
+                row["interests"],
+                row["leads"],
+                conversion(row["leads"], row["shows"]),
+            ]
+        )
+    seen_rows = [["Дата показа", "Пользователь", "Username", "Chat ID", "Лот", "Район", "Клики", "Заявки"]]
+    for row in data["seen_rows"]:
+        seen_rows.append(
+            [
+                row["seen_at"],
+                row["client_name"],
+                f"@{row['username']}" if row["username"] else "",
+                row["chat_id"],
+                row["title"] or "Лот удалён",
+                row["district"],
+                row["clicks"],
+                row["leads"],
+            ]
+        )
+    event_rows = [["Действие", "Техническое событие", "Клики"]]
+    for row in data["event_rows"]:
+        event_rows.append([event_label(row["event_type"]), row["event_type"], row["c"]])
+    return build_xlsx_package(
+        [
+            ("Обзор", overview_rows),
+            ("Лоты", project_rows),
+            ("Кто видел", seen_rows),
+            ("Клики", event_rows),
+        ]
+    )
 
 
 def project_form(project=None, message=""):
@@ -2123,6 +2357,14 @@ class Handler(BaseHTTPRequestHandler):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 filename,
             )
+        elif path == "/stats/export.xlsx":
+            period = parse_stats_period(query)
+            filename = f"bot_stats_{now_local().strftime('%Y-%m-%d')}.xlsx"
+            self.send_bytes(
+                build_statistics_xlsx(period),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename,
+            )
         elif path == "/project/new":
             self.send_html(project_form())
         elif path == "/project/edit":
@@ -2131,7 +2373,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/leads":
             self.send_html(leads_page())
         elif path == "/stats":
-            self.send_html(statistics_page())
+            self.send_html(statistics_page(query))
         elif path == "/broadcasts":
             self.send_html(broadcasts_page())
         elif path == "/subscribers":
