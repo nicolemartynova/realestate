@@ -250,6 +250,17 @@ def init_db():
               created_at text not null
             );
 
+            create table if not exists web_leads (
+              id integer primary key autoincrement,
+              project_id integer,
+              name text,
+              contact_value text not null,
+              message text,
+              status text not null default 'new',
+              created_at text not null,
+              foreign key(project_id) references projects(id)
+            );
+
             create table if not exists bot_events (
               id integer primary key autoincrement,
               chat_id integer not null,
@@ -283,6 +294,7 @@ def init_db():
         ensure_column(conn, "subscribers", "chat_read_at", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
+        ensure_column(conn, "web_leads", "status", "text not null default 'new'")
 
 
 def ensure_column(conn, table_name, column_name, column_type):
@@ -468,6 +480,10 @@ def media_url(file_name):
     if not PUBLIC_BASE_URL:
         return None
     return f"{PUBLIC_BASE_URL}/media/{urllib.parse.quote(file_name)}"
+
+
+def app_media_path(file_name):
+    return f"/media/{urllib.parse.quote(file_name)}"
 
 
 def send_message(chat_id, text, keyboard=None, parse_mode="HTML"):
@@ -1012,12 +1028,15 @@ def project_actions_keyboard(project_id, filters_active=False):
         if filters_active
         else {"text": "🔎 Искать по фильтрам", "callback_data": "filter_start"}
     )
+    rows = [
+        [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
+        [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
+        [filter_button],
+    ]
+    if PUBLIC_BASE_URL:
+        rows.append([{"text": "🏙 Открыть каталог", "url": f"{PUBLIC_BASE_URL}/app"}])
     return inline_keyboard(
-        [
-            [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
-            [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
-            [filter_button],
-        ]
+        rows
     )
 
 
@@ -1935,6 +1954,218 @@ def build_active_projects_xlsx():
     return build_xlsx_package([("Актуальные лоты", rows)])
 
 
+def app_layout(title, content, message=""):
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <style>{APP_CSS}</style>
+</head>
+<body>
+  <main class="app-shell">
+    {f'<div class="notice">{escape(message)}</div>' if message else ''}
+    {content}
+  </main>
+</body>
+</html>"""
+
+
+def project_cover(project_id):
+    with db() as conn:
+        media = conn.execute(
+            """
+            select * from media
+            where project_id = ? and mime_type like 'image/%'
+            order by id asc
+            limit 1
+            """,
+            (project_id,),
+        ).fetchone()
+    return app_media_path(media["file_name"]) if media else ""
+
+
+def app_filter_options():
+    with db() as conn:
+        districts = conn.execute(
+            "select distinct district from projects where status='active' and district != '' order by district"
+        ).fetchall()
+        rooms = conn.execute(
+            "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
+        ).fetchall()
+    return [row["district"] for row in districts], [row["rooms"] for row in rooms]
+
+
+def app_projects_page(query=None, message=""):
+    query = query or {}
+    search = (query.get("q", [""])[0] or "").strip()
+    district = (query.get("district", [""])[0] or "").strip()
+    rooms = (query.get("rooms", [""])[0] or "").strip()
+    max_price = (query.get("max_price", [""])[0] or "").strip()
+    where = ["status = 'active'"]
+    params = []
+    if search:
+        where.append("(title like ? or building like ? or district like ? or category like ?)")
+        like = f"%{search}%"
+        params.extend([like, like, like, like])
+    if district:
+        where.append("district = ?")
+        params.append(district)
+    if rooms:
+        where.append("rooms = ?")
+        params.append(rooms)
+    if max_price:
+        try:
+            max_price_value = float(max_price.replace(" ", "").replace(",", "."))
+            where.append("price <= ?")
+            params.append(max_price_value)
+        except ValueError:
+            pass
+    with db() as conn:
+        projects = conn.execute(
+            f"""
+            select * from projects
+            where {' and '.join(where)}
+            order by created_at desc, id desc
+            """,
+            params,
+        ).fetchall()
+    districts, rooms_options = app_filter_options()
+    district_options = '<option value="">Все районы</option>' + "".join(
+        f'<option value="{escape(item)}"{" selected" if item == district else ""}>{escape(item)}</option>'
+        for item in districts
+    )
+    rooms_select = '<option value="">Любые комнаты</option>' + "".join(
+        f'<option value="{escape(item)}"{" selected" if item == rooms else ""}>{escape(item)}</option>'
+        for item in rooms_options
+    )
+    cards = "".join(app_project_card(project) for project in projects)
+    content = f"""
+    <section class="app-hero">
+      <div class="app-brand">Below Market Dubai</div>
+      <h1>Лоты недвижимости в Дубае ниже рынка</h1>
+      <p>Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами.</p>
+    </section>
+    <form class="app-filters" method="get" action="/app">
+      <input name="q" value="{escape(search)}" placeholder="Район, здание или название">
+      <select name="district">{district_options}</select>
+      <select name="rooms">{rooms_select}</select>
+      <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="Цена до, AED">
+      <button>Найти</button>
+      <a class="app-button secondary" href="/app">Сбросить</a>
+    </form>
+    {f'<section class="lot-grid">{cards}</section>' if cards else '<div class="empty-state">По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор.</div>'}
+    """
+    return app_layout("Below Market Dubai", content, message)
+
+
+def app_project_card(project):
+    cover = project_cover(project["id"])
+    discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+    discount_label = f"<span>Ниже рынка на {discount}%</span>" if discount and discount > 0 else ""
+    return f"""
+    <a class="lot-card" href="/app/lot?id={project['id']}">
+      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else 'Фото скоро появятся'}</div>
+      <div class="lot-body">
+        <div class="lot-title"><span>{escape(project['title'])}</span><span class="lot-price">{money(project['price'])} AED</span></div>
+        <div>{escape(project['building'])}<br><span class="muted">{escape(project['district'])}</span></div>
+        <div class="lot-meta">
+          <span>{escape(project['category'])}</span>
+          <span>{escape(project['rooms'])}</span>
+          <span>{escape(project['area'])}</span>
+          {discount_label}
+        </div>
+      </div>
+    </a>
+    """
+
+
+def app_project_page(project_id, message=""):
+    project = get_project(project_id)
+    if not project or project["status"] != "active":
+        return app_projects_page(message="Лот не найден или больше не актуален.")
+    media = get_project_media(project_id)
+    gallery_items = []
+    for item in media:
+        src = app_media_path(item["file_name"])
+        if item["mime_type"].startswith("video/"):
+            gallery_items.append(f'<div class="gallery-item"><video src="{escape(src)}" controls playsinline></video></div>')
+        else:
+            gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt=""></div>')
+    facts = [
+        ("Категория", project["category"]),
+        ("Район", project["district"]),
+        ("Здание", project["building"]),
+        ("Комнаты", project["rooms"]),
+        ("Санузлы", project["bathrooms"]),
+        ("Этаж", project["floor_level"]),
+        ("Парковка", project["parking"]),
+        ("Статус", project["availability"]),
+        ("Меблировка", project["furnishing"]),
+        ("Балкон", project["balcony"]),
+        ("Площадь", project["area"]),
+    ]
+    fact_html = "".join(
+        f'<div class="fact"><small>{escape(label)}</small>{escape(value)}</div>'
+        for label, value in facts
+        if value not in (None, "")
+    )
+    if project["market_price"]:
+        discount = pct_below(project["price"], project["market_price"])
+        fact_html += f'<div class="fact"><small>Средняя цена рынка</small>{money(project["market_price"])} AED</div>'
+        if discount and discount > 0:
+            fact_html += f'<div class="fact"><small>Ниже рынка</small>на {discount}%</div>'
+    content = f"""
+    <a class="back-link" href="/app">← Все лоты</a>
+    <section class="lot-detail">
+      <div class="gallery">{''.join(gallery_items) or '<div class="gallery-item">Фото скоро появятся</div>'}</div>
+      <aside class="detail-panel">
+        <div>
+          <div class="app-brand">Лот #{project['id']}</div>
+          <h1>{escape(project['title'])}</h1>
+        </div>
+        <div class="detail-price">{money(project['price'])} AED</div>
+        <div class="facts">{fact_html}</div>
+        {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
+        <form class="lead-form" method="post" action="/app/lead">
+          <input type="hidden" name="project_id" value="{project['id']}">
+          <input name="name" placeholder="Ваше имя">
+          <input name="contact" required placeholder="Телефон, WhatsApp или Telegram">
+          <textarea name="message" placeholder="Комментарий"></textarea>
+          <button>💬 Хочу узнать подробнее</button>
+        </form>
+      </aside>
+    </section>
+    """
+    return app_layout(project["title"], content, message)
+
+
+def create_web_lead(project_id, name, contact, message):
+    project = get_project(project_id) if project_id else None
+    with db() as conn:
+        cur = conn.execute(
+            """
+            insert into web_leads(project_id, name, contact_value, message, created_at)
+            values (?, ?, ?, ?, ?)
+            """,
+            (project_id if project else None, name, contact, message, iso_now()),
+        )
+        lead_id = cur.lastrowid
+    notify_admin(
+        "\n".join(
+            [
+                "Новая заявка из мини-приложения",
+                f"Лот: {project['title'] if project else 'не выбран'}",
+                f"Клиент: {name or 'не указано'}",
+                f"Контакт: {contact}",
+                f"Комментарий: {message}" if message else "",
+            ]
+        ).strip()
+    )
+    return lead_id
+
+
 def layout(title, content, active="projects", message=""):
     nav = [
         ("projects", "/", "Объекты"),
@@ -2045,6 +2276,49 @@ textarea { min-height:110px; resize:vertical; }
 .login h1 { font-size:24px; }
 .muted { color:var(--muted); }
 @media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { height:auto; min-height:0; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { height:calc(100vh - 190px); min-height:520px; } .chat-sidebar { max-height:360px; } }
+"""
+
+APP_CSS = """
+:root { --bg:#f4f5f2; --card:#fff; --text:#17221d; --muted:#66736b; --line:#dfe4df; --accent:#245a49; --gold:#b8792a; }
+* { box-sizing:border-box; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
+a { color:inherit; }
+.app-shell { max-width:1180px; margin:0 auto; padding:18px 18px 48px; }
+.app-hero { display:grid; gap:8px; padding:18px 0 16px; }
+.app-brand { font-size:13px; color:var(--gold); font-weight:800; text-transform:uppercase; letter-spacing:.8px; }
+.app-hero h1 { margin:0; font-size:clamp(28px,5vw,44px); line-height:1.06; letter-spacing:0; max-width:780px; }
+.app-hero p { margin:0; max-width:680px; color:var(--muted); font-size:16px; }
+.app-filters { position:sticky; top:0; z-index:2; display:grid; grid-template-columns:1.2fr 1fr 1fr auto auto; gap:10px; padding:12px; margin:10px 0 18px; background:rgba(244,245,242,.92); backdrop-filter:blur(10px); border:1px solid var(--line); border-radius:8px; }
+input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:11px 12px; background:#fff; color:var(--text); font:inherit; }
+button, .app-button { border:0; border-radius:7px; padding:11px 14px; background:var(--accent); color:#fff; font-weight:800; text-decoration:none; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+.app-button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
+.lot-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+.lot-card { display:grid; overflow:hidden; background:var(--card); border:1px solid var(--line); border-radius:8px; text-decoration:none; min-height:100%; }
+.lot-cover { aspect-ratio:4/3; background:#e7ebe7; overflow:hidden; display:grid; place-items:center; color:var(--muted); }
+.lot-cover img { width:100%; height:100%; object-fit:cover; display:block; }
+.lot-body { padding:13px; display:grid; gap:8px; }
+.lot-title { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; font-weight:850; font-size:16px; }
+.lot-price { color:var(--accent); white-space:nowrap; }
+.lot-meta { display:flex; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:13px; }
+.lot-meta span { padding:4px 8px; background:#f4f7f5; border:1px solid var(--line); border-radius:999px; }
+.lot-detail { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(320px,.65fr); gap:18px; align-items:start; }
+.gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.gallery-item { border-radius:8px; overflow:hidden; background:#e7ebe7; aspect-ratio:4/3; }
+.gallery-item img, .gallery-item video { width:100%; height:100%; object-fit:cover; display:block; }
+.detail-panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:14px; position:sticky; top:14px; }
+.detail-panel h1 { margin:0; font-size:26px; line-height:1.12; }
+.detail-price { font-size:24px; color:var(--accent); font-weight:900; }
+.facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.fact { padding:10px; background:#f8faf8; border:1px solid var(--line); border-radius:7px; }
+.fact small { display:block; color:var(--muted); font-weight:700; margin-bottom:2px; }
+.lead-form { display:grid; gap:10px; }
+.lead-form textarea { min-height:92px; resize:vertical; }
+.empty-state { padding:24px; background:#fff; border:1px solid var(--line); border-radius:8px; color:var(--muted); }
+.back-link { display:inline-flex; margin:0 0 14px; color:var(--muted); text-decoration:none; font-weight:800; }
+.notice { background:#fff7e8; border:1px solid #ead6b5; color:#614111; padding:12px 14px; border-radius:8px; margin-bottom:16px; }
+.muted { color:var(--muted); }
+@media (max-width:900px) { .app-shell { padding:14px 12px 36px; } .app-filters { position:static; grid-template-columns:1fr 1fr; } .app-filters input:first-child { grid-column:1 / -1; } .lot-grid { grid-template-columns:1fr; } .lot-detail { grid-template-columns:1fr; } .detail-panel { position:static; } }
+@media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } }
 """
 
 
@@ -2481,6 +2755,13 @@ def leads_page():
             order by created_at desc
             """
         ).fetchall()
+        web_leads = conn.execute(
+            """
+            select l.*, p.title project_title from web_leads l
+            left join projects p on p.id = l.project_id
+            order by l.created_at desc
+            """
+        ).fetchall()
     rows = "".join(
         f"""
         <tr>
@@ -2543,10 +2824,36 @@ def leads_page():
         """
         for l in personal_leads
     )
+    web_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(l['created_at'])}</td>
+          <td><strong>{escape(l['name'] or 'Не указано')}</strong></td>
+          <td>{escape(l['project_title'] or 'Лот не выбран / удалён')}</td>
+          <td>{escape(l['contact_value'])}</td>
+          <td>{escape(l['message'])}</td>
+          <td>
+            <form method="post" action="/web-lead/status" class="actions">
+              <input type="hidden" name="id" value="{l['id']}">
+              <select name="status">{lead_status_select(l['status'])}</select>
+              <button>Сохранить</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="/web-lead/delete" class="inline"><input type="hidden" name="id" value="{l['id']}"><button class="danger">Удалить</button></form>
+          </td>
+        </tr>
+        """
+        for l in web_leads
+    )
     empty = '<tr><td colspan="6" class="muted">Заявок пока нет.</td></tr>'
     return layout(
         "Заявки",
         f"""
+        <div class="panel">
+          <h2>Заявки из мини-приложения</h2>
+          <table><thead><tr><th>Дата</th><th>Клиент</th><th>Лот</th><th>Контакт</th><th>Комментарий</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{web_rows or '<tr><td colspan="7" class="muted">Заявок из мини-приложения пока нет.</td></tr>'}</tbody></table>
+        </div>
         <div class="panel">
           <h2>Заявки на персональный подбор</h2>
           <table><thead><tr><th>Дата</th><th>Клиент</th><th>Контакт</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{personal_rows or '<tr><td colspan="5" class="muted">Заявок на персональный подбор пока нет.</td></tr>'}</tbody></table>
@@ -2987,6 +3294,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
             self.end_headers()
+        elif path == "/app":
+            self.send_html(app_projects_page(query))
+        elif path == "/app/lot":
+            try:
+                project_id = int(query.get("id", ["0"])[0])
+            except ValueError:
+                project_id = 0
+            self.send_html(app_project_page(project_id))
         elif path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"), include_body=True)
         elif not self.require_auth():
@@ -3069,6 +3384,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(login_page("Неверный логин или пароль"), status=401)
             return
 
+        if path == "/app/lead":
+            form = parse_form(self)
+            project_id = int(form_value(form, "project_id", "0") or 0)
+            name = form_value(form, "name").strip()
+            contact = form_value(form, "contact").strip()
+            message = form_value(form, "message").strip()
+            if not contact:
+                self.send_html(app_project_page(project_id, "Укажите телефон, WhatsApp или Telegram."), status=400)
+                return
+            create_web_lead(project_id, name, contact, message)
+            self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами."))
+            return
+
         if not self.require_auth():
             return
 
@@ -3128,6 +3456,18 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_form(self)
             with db() as conn:
                 conn.execute("delete from personal_leads where id = ?", (form_value(form, "id"),))
+            self.redirect("/leads")
+        elif path == "/web-lead/status":
+            form = parse_form(self)
+            status = form_value(form, "status")
+            if status in LEAD_STATUS_LABELS:
+                with db() as conn:
+                    conn.execute("update web_leads set status = ? where id = ?", (status, form_value(form, "id")))
+            self.redirect("/leads")
+        elif path == "/web-lead/delete":
+            form = parse_form(self)
+            with db() as conn:
+                conn.execute("delete from web_leads where id = ?", (form_value(form, "id"),))
             self.redirect("/leads")
         elif path == "/subscriber/message":
             form = parse_form(self)
