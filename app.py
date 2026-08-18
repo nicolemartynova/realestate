@@ -140,6 +140,7 @@ def init_db():
               original_price real,
               source_from text,
               description text,
+              cover_media_id integer,
               tg_media_file_id text,
               tg_media_kind text,
               tg_media_signature text,
@@ -288,6 +289,7 @@ def init_db():
         ensure_column(conn, "projects", "tg_media_kind", "text")
         ensure_column(conn, "projects", "tg_media_signature", "text")
         ensure_column(conn, "projects", "source_from", "text")
+        ensure_column(conn, "projects", "cover_media_id", "integer")
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
@@ -1990,13 +1992,23 @@ def project_cover(project_id):
     with db() as conn:
         media = conn.execute(
             """
-            select * from media
-            where project_id = ? and mime_type like 'image/%'
-            order by id asc
+            select m.* from projects p
+            join media m on m.id = p.cover_media_id and m.project_id = p.id
+            where p.id = ? and m.mime_type like 'image/%'
             limit 1
             """,
             (project_id,),
         ).fetchone()
+        if not media:
+            media = conn.execute(
+                """
+                select * from media
+                where project_id = ? and mime_type like 'image/%'
+                order by id asc
+                limit 1
+                """,
+                (project_id,),
+            ).fetchone()
     return app_media_path(media["file_name"]) if media else ""
 
 
@@ -2283,6 +2295,11 @@ textarea { min-height:110px; resize:vertical; }
 .chat-compose label { color:var(--text); font-size:13px; }
 .chat-compose textarea { min-height:118px; font-size:15px; }
 .chat-compose p { margin:10px 0 0; }
+.media-picker { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; margin-top:12px; }
+.media-option { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fafbf9; display:grid; gap:8px; }
+.media-option img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px; background:#e7ebe7; }
+.media-option label { display:flex; align-items:center; gap:8px; color:var(--text); font-size:13px; }
+.media-name { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .wide { grid-column:1 / -1; }
 .notice { background:#fff7e8; border:1px solid #ead6b5; color:#614111; padding:12px 14px; border-radius:8px; margin-bottom:16px; }
 .login { min-height:100vh; display:grid; grid-template-columns:1fr; place-items:center; background:var(--bg); }
@@ -2730,9 +2747,33 @@ def project_form(project=None, message=""):
     """
     if project:
         media = get_project_media(project["id"])
-        content += "<div class='panel'><h2>Медиа</h2>" + (
-            "".join(f"<p>{escape(m['original_name'])}</p>" for m in media) or "<p class='muted'>Файлов пока нет.</p>"
-        ) + "</div>"
+        image_options = "".join(
+            f"""
+            <div class="media-option">
+              <img src="{app_media_path(m['file_name'])}" alt="">
+              <label><input type="radio" name="cover_media_id" value="{m['id']}" form="cover-form" {'checked' if str(p.get('cover_media_id') or '') == str(m['id']) else ''}> Обложка мини-аппа</label>
+              <div class="media-name">{escape(m['original_name'])}</div>
+            </div>
+            """
+            for m in media
+            if m["mime_type"].startswith("image/")
+        )
+        other_files = "".join(
+            f"<p>{escape(m['original_name'])}</p>"
+            for m in media
+            if not m["mime_type"].startswith("image/")
+        )
+        content += f"""
+        <div class='panel'>
+          <h2>Медиа</h2>
+          <form id="cover-form" method="post" action="/project/cover">
+            <input type="hidden" name="id" value="{project['id']}">
+            <div class="media-picker">{image_options or "<p class='muted'>Изображений пока нет.</p>"}</div>
+            {f"<h3>Видео и другие файлы</h3>{other_files}" if other_files else ""}
+            <p><button>Сохранить обложку мини-аппа</button></p>
+          </form>
+        </div>
+        """
     return layout("Редактировать объект" if project else "Добавить объект", content, "new", message)
 
 
@@ -3233,11 +3274,38 @@ def save_project(form, project_id=None):
                 shutil.copyfileobj(item.file, out)
             mime = item.type or mimetypes.guess_type(item.filename)[0] or "application/octet-stream"
             with db() as conn:
-                conn.execute(
+                cur = conn.execute(
                     "insert into media(project_id, file_name, original_name, mime_type, created_at) values (?, ?, ?, ?, ?)",
                     (new_id, safe_name, item.filename, mime, iso_now()),
                 )
+                media_id = cur.lastrowid
+                if mime.startswith("image/"):
+                    conn.execute(
+                        """
+                        update projects
+                        set cover_media_id = coalesce(cover_media_id, ?)
+                        where id = ?
+                        """,
+                        (media_id, new_id),
+                    )
     return new_id
+
+
+def save_project_cover(project_id, cover_media_id):
+    project_id = int(project_id)
+    cover_media_id = int(cover_media_id)
+    with db() as conn:
+        media = conn.execute(
+            "select id from media where id = ? and project_id = ? and mime_type like 'image/%'",
+            (cover_media_id, project_id),
+        ).fetchone()
+        if not media:
+            return False
+        conn.execute(
+            "update projects set cover_media_id = ?, updated_at = ? where id = ?",
+            (cover_media_id, iso_now(), project_id),
+        )
+    return True
 
 
 def delete_project(project_id):
@@ -3431,6 +3499,15 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_form(self)
             delete_project(form_value(form, "id"))
             self.redirect("/")
+        elif path == "/project/cover":
+            form = parse_form(self)
+            project_id = form_value(form, "id")
+            cover_media_id = form_value(form, "cover_media_id")
+            if project_id and cover_media_id and save_project_cover(project_id, cover_media_id):
+                self.redirect(f"/project/edit?id={project_id}")
+            else:
+                project = get_project(int(project_id or 0))
+                self.send_html(project_form(project, "Выберите изображение для обложки") if project else dashboard("Лот не найден"), status=400)
         elif path == "/project/send":
             form = parse_form(self)
             count = send_to_all(int(form_value(form, "id")))
