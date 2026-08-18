@@ -834,6 +834,7 @@ def first_active_project():
 def next_project_for(chat_id, exclude_id=None):
     with db() as conn:
         sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
+        has_filters = bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
         params = [chat_id]
         extra = ""
         if exclude_id:
@@ -845,11 +846,54 @@ def next_project_for(chat_id, exclude_id=None):
         if sub and sub["filter_district"]:
             extra += " and p.district = ?"
             params.append(sub["filter_district"])
-        return conn.execute(
+        project = conn.execute(
             f"""
             select p.* from projects p
             left join seen_projects s on s.project_id = p.id and s.chat_id = ?
             where p.status = 'active' and s.project_id is null {extra}
+            order by p.created_at asc, p.id asc
+            limit 1
+            """,
+            params,
+        ).fetchone()
+        if project or not has_filters:
+            return project
+
+        params = []
+        extra = ""
+        if exclude_id:
+            extra = "and p.id != ?"
+            params.append(exclude_id)
+        if sub and sub["filter_rooms"]:
+            extra += " and p.rooms = ?"
+            params.append(sub["filter_rooms"])
+        if sub and sub["filter_district"]:
+            extra += " and p.district = ?"
+            params.append(sub["filter_district"])
+        project = conn.execute(
+            f"""
+            select p.* from projects p
+            where p.status = 'active' {extra}
+            order by p.created_at asc, p.id asc
+            limit 1
+            """,
+            params,
+        ).fetchone()
+        if project or not exclude_id:
+            return project
+
+        params = []
+        extra = ""
+        if sub and sub["filter_rooms"]:
+            extra += " and p.rooms = ?"
+            params.append(sub["filter_rooms"])
+        if sub and sub["filter_district"]:
+            extra += " and p.district = ?"
+            params.append(sub["filter_district"])
+        return conn.execute(
+            f"""
+            select p.* from projects p
+            where p.status = 'active' {extra}
             order by p.created_at asc, p.id asc
             limit 1
             """,
@@ -1349,7 +1393,7 @@ def handle_callback_inner(callback):
         with db() as conn:
             conn.execute("update subscribers set filter_district=? where chat_id = ?", (district, chat_id))
         total, unseen = filtered_projects_counts(chat_id)
-        send_message(chat_id, f"Нашла подходящих вариантов: {total}. Ещё не просмотрено: {unseen}. Буду отправлять их по очереди.")
+        send_message(chat_id, f"Нашла подходящих вариантов: {total}. Новых для просмотра: {unseen}. Если новых нет, покажу подходящие лоты повторно.")
         send_project(chat_id, next_project_for(chat_id), user=user)
         return
 
