@@ -168,7 +168,8 @@ def init_db():
               filter_district text,
               subscribed_at text not null,
               last_seen_at text,
-              last_daily_sent_at text
+              last_daily_sent_at text,
+              chat_read_at text
             );
 
             create table if not exists seen_projects (
@@ -277,6 +278,7 @@ def init_db():
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
+        ensure_column(conn, "subscribers", "chat_read_at", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
 
@@ -1905,7 +1907,9 @@ textarea { min-height:110px; resize:vertical; }
 .chat-list a { display:block; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--text); text-decoration:none; }
 .chat-list a.active, .chat-list a:hover { background:#eef4f0; }
 .chat-list strong { display:block; font-size:14px; margin-bottom:2px; }
+.chat-list-title { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .chat-preview { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.unread-badge { flex:0 0 auto; min-width:22px; height:22px; padding:0 7px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; background:var(--danger); color:#fff; font-size:12px; font-weight:800; }
 .chat-shell { padding:0; display:grid; grid-template-rows:auto minmax(0,1fr) auto; overflow:hidden; min-height:0; }
 .chat-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; padding:18px; border-bottom:1px solid var(--line); margin:0; }
 .chat-header h2 { margin:0 0 2px; }
@@ -2548,6 +2552,25 @@ def chat_display_name(row):
 
 def chats_page(chat_id="", message=""):
     with db() as conn:
+        if not chat_id:
+            first_conversation = conn.execute(
+                """
+                select s.chat_id
+                from subscribers s
+                left join chat_messages cm on cm.id = (
+                  select id from chat_messages
+                  where chat_id = s.chat_id
+                  order by created_at desc, id desc
+                  limit 1
+                )
+                order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
+                limit 1
+                """
+            ).fetchone()
+            if first_conversation:
+                chat_id = str(first_conversation["chat_id"])
+        if chat_id:
+            conn.execute("update subscribers set chat_read_at = ? where chat_id = ?", (iso_now(), chat_id))
         conversations = conn.execute(
             """
             select
@@ -2555,7 +2578,14 @@ def chats_page(chat_id="", message=""):
               cm.text last_text,
               cm.direction last_direction,
               cm.created_at last_message_at,
-              (select count(*) from chat_messages where chat_id = s.chat_id) message_count
+              (select count(*) from chat_messages where chat_id = s.chat_id) message_count,
+              (
+                select count(*)
+                from chat_messages unread
+                where unread.chat_id = s.chat_id
+                  and unread.direction = 'user'
+                  and (s.chat_read_at is null or unread.created_at > s.chat_read_at)
+              ) unread_count
             from subscribers s
             left join chat_messages cm on cm.id = (
               select id from chat_messages
@@ -2566,8 +2596,6 @@ def chats_page(chat_id="", message=""):
             order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
             """
         ).fetchall()
-        if not chat_id and conversations:
-            chat_id = str(conversations[0]["chat_id"])
         subscriber = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone() if chat_id else None
         messages = conn.execute(
             "select * from chat_messages where chat_id = ? order by created_at asc",
@@ -2577,7 +2605,10 @@ def chats_page(chat_id="", message=""):
     dialog_rows = "".join(
         f"""
         <a class="{'active' if str(row['chat_id']) == str(chat_id) else ''}" href="/chats?chat_id={escape(row['chat_id'])}">
-          <strong>{escape(chat_display_name(row))}</strong>
+          <div class="chat-list-title">
+            <strong>{escape(chat_display_name(row))}</strong>
+            {f'<span class="unread-badge">{row["unread_count"]}</span>' if row["unread_count"] else ''}
+          </div>
           <div class="chat-preview">{escape('@' + row['username'] if row['username'] else 'Chat ID: ' + str(row['chat_id']))}</div>
           <div class="chat-preview">{escape(('Менеджер: ' if row['last_direction'] == 'admin' else 'Клиент: ') + row['last_text'] if row['last_text'] else 'Сообщений пока нет')}</div>
         </a>
