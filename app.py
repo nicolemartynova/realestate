@@ -1827,6 +1827,7 @@ def layout(title, content, active="projects", message=""):
         ("stats", "/stats", "Статистика"),
         ("broadcasts", "/broadcasts", "Рассылки"),
         ("subscribers", "/subscribers", "Подписчики"),
+        ("chats", "/chats", "Чаты"),
     ]
     links = "".join(
         f'<a class="{ "active" if active == key else "" }" href="{href}">{label}</a>'
@@ -1897,19 +1898,33 @@ form.inline { display:inline; }
 label { display:grid; gap:6px; color:var(--muted); font-weight:700; font-size:12px; }
 input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:10px 11px; background:#fff; color:var(--text); font:inherit; }
 textarea { min-height:110px; resize:vertical; }
-.chat-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:16px; }
-.chat-thread { display:grid; gap:10px; max-height:58vh; overflow:auto; padding:14px; background:#f8faf8; border:1px solid var(--line); border-radius:8px; }
-.chat-bubble { max-width:min(720px,82%); padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:#fff; white-space:pre-wrap; }
-.chat-bubble.admin { justify-self:end; background:#e8f1ed; border-color:#c9ddd3; }
+.chat-layout { display:grid; grid-template-columns:320px minmax(0,1fr); gap:16px; min-height:calc(100vh - 150px); }
+.chat-sidebar { padding:0; overflow:hidden; display:flex; flex-direction:column; }
+.chat-sidebar h2 { margin:0; padding:18px 18px 12px; }
+.chat-list { overflow:auto; border-top:1px solid var(--line); }
+.chat-list a { display:block; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--text); text-decoration:none; }
+.chat-list a.active, .chat-list a:hover { background:#eef4f0; }
+.chat-list strong { display:block; font-size:14px; margin-bottom:2px; }
+.chat-preview { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.chat-shell { padding:0; display:grid; grid-template-rows:auto minmax(320px,1fr) auto; overflow:hidden; }
+.chat-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; padding:18px; border-bottom:1px solid var(--line); margin:0; }
+.chat-header h2 { margin:0 0 2px; }
+.chat-thread { display:grid; align-content:start; gap:10px; overflow:auto; padding:18px; background:#f8faf8; }
+.chat-bubble { max-width:min(680px,78%); padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; white-space:pre-wrap; box-shadow:0 1px 1px rgba(0,0,0,.02); }
+.chat-bubble.admin { justify-self:end; background:#e1eee8; border-color:#c4d9ce; }
+.chat-bubble.user { justify-self:start; }
 .chat-meta { margin-bottom:4px; color:var(--muted); font-size:12px; font-weight:700; }
-.chat-compose textarea { min-height:160px; font-size:15px; }
+.chat-compose { border-top:1px solid var(--line); padding:14px 18px 18px; background:#fff; }
+.chat-compose label { color:var(--text); font-size:13px; }
+.chat-compose textarea { min-height:118px; font-size:15px; }
+.chat-compose p { margin:10px 0 0; }
 .wide { grid-column:1 / -1; }
 .notice { background:#fff7e8; border:1px solid #ead6b5; color:#614111; padding:12px 14px; border-radius:8px; margin-bottom:16px; }
 .login { min-height:100vh; display:grid; grid-template-columns:1fr; place-items:center; background:var(--bg); }
 .login form { width:min(420px,calc(100vw - 32px)); background:#fff; border:1px solid var(--line); border-radius:8px; padding:26px; display:grid; gap:14px; }
 .login h1 { font-size:24px; }
 .muted { color:var(--muted); }
-@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid { grid-template-columns:1fr; } main { padding:22px 16px 44px; } }
+@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { min-height:auto; } .chat-shell { min-height:70vh; } }
 """
 
 
@@ -2483,9 +2498,6 @@ def broadcasts_page(message=""):
 def subscribers_page(message=""):
     with db() as conn:
         rows_data = conn.execute("select * from subscribers order by subscribed_at desc").fetchall()
-        chat_rows = conn.execute(
-            "select * from chat_messages order by created_at desc limit 80"
-        ).fetchall()
     rows = "".join(
         f"""
         <tr>
@@ -2499,17 +2511,6 @@ def subscribers_page(message=""):
         </tr>
         """
         for s in rows_data
-    )
-    chat_history = "".join(
-        f"""
-        <tr>
-          <td>{escape(row['created_at'])}</td>
-          <td>{escape('Админ → клиент' if row['direction'] == 'admin' else 'Клиент → админ')}</td>
-          <td><strong>{escape(row['name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span><br><a href="/subscriber/chat?chat_id={escape(row['chat_id'])}">Открыть чат</a></td>
-          <td>{escape(row['text'])}</td>
-        </tr>
-        """
-        for row in chat_rows
     )
     empty = '<tr><td colspan="5" class="muted">Подписчиков пока нет.</td></tr>'
     return layout(
@@ -2533,29 +2534,73 @@ def subscribers_page(message=""):
           <h2>Подписчики</h2>
           <div class="table-scroll"><table><thead><tr><th>Chat ID</th><th>Имя</th><th>Подписался</th><th>Последняя активность</th><th>Написать</th></tr></thead><tbody>{rows or empty}</tbody></table></div>
         </div>
-        <div class="panel">
-          <h2>Последние сообщения</h2>
-          <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Направление</th><th>Пользователь</th><th>Сообщение</th></tr></thead><tbody>{chat_history or '<tr><td colspan="4" class="muted">Сообщений пока нет.</td></tr>'}</tbody></table></div>
-        </div>
         """,
         "subscribers",
         message,
     )
 
 
-def subscriber_chat_page(chat_id, message=""):
+def chat_display_name(row):
+    return " ".join(
+        part for part in [row["first_name"], row["last_name"]] if part
+    ) or row["username"] or str(row["chat_id"])
+
+
+def chats_page(chat_id="", message=""):
     with db() as conn:
-        subscriber = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone()
+        conversations = conn.execute(
+            """
+            select
+              s.*,
+              cm.text last_text,
+              cm.direction last_direction,
+              cm.created_at last_message_at,
+              (select count(*) from chat_messages where chat_id = s.chat_id) message_count
+            from subscribers s
+            left join chat_messages cm on cm.id = (
+              select id from chat_messages
+              where chat_id = s.chat_id
+              order by created_at desc, id desc
+              limit 1
+            )
+            order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
+            """
+        ).fetchall()
+        if not chat_id and conversations:
+            chat_id = str(conversations[0]["chat_id"])
+        subscriber = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone() if chat_id else None
         messages = conn.execute(
             "select * from chat_messages where chat_id = ? order by created_at asc",
             (chat_id,),
-        ).fetchall()
-    if not subscriber:
-        return subscribers_page("Подписчик не найден")
+        ).fetchall() if subscriber else []
 
-    display_name = " ".join(
-        part for part in [subscriber["first_name"], subscriber["last_name"]] if part
-    ) or subscriber["username"] or str(subscriber["chat_id"])
+    dialog_rows = "".join(
+        f"""
+        <a class="{'active' if str(row['chat_id']) == str(chat_id) else ''}" href="/chats?chat_id={escape(row['chat_id'])}">
+          <strong>{escape(chat_display_name(row))}</strong>
+          <div class="chat-preview">{escape('@' + row['username'] if row['username'] else 'Chat ID: ' + str(row['chat_id']))}</div>
+          <div class="chat-preview">{escape(('Менеджер: ' if row['last_direction'] == 'admin' else 'Клиент: ') + row['last_text'] if row['last_text'] else 'Сообщений пока нет')}</div>
+        </a>
+        """
+        for row in conversations
+    )
+
+    if not subscriber:
+        content = f"""
+        <div class="chat-layout">
+          <section class="panel chat-sidebar">
+            <h2>Диалоги</h2>
+            <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Диалогов пока нет.</p>'}</div>
+          </section>
+          <section class="panel chat-shell">
+            <div class="chat-header"><div><h2>Выберите чат</h2><p class="muted">Откройте диалог из списка слева.</p></div></div>
+            <div class="chat-thread"></div>
+          </section>
+        </div>
+        """
+        return layout("Чаты", content, "chats", message)
+
+    display_name = chat_display_name(subscriber)
     bubbles = "".join(
         f"""
         <div class="chat-bubble {'admin' if row['direction'] == 'admin' else 'user'}">
@@ -2566,24 +2611,29 @@ def subscriber_chat_page(chat_id, message=""):
         for row in messages
     )
     content = f"""
-    <div class="panel">
-      <div class="chat-header">
-        <div>
-          <h2>{escape(display_name)}</h2>
-          <p class="muted">{'@' + escape(subscriber['username']) if subscriber['username'] else 'Chat ID: ' + escape(subscriber['chat_id'])}</p>
+    <div class="chat-layout">
+      <section class="panel chat-sidebar">
+        <h2>Диалоги</h2>
+        <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Диалогов пока нет.</p>'}</div>
+      </section>
+      <section class="panel chat-shell">
+        <div class="chat-header">
+          <div>
+            <h2>{escape(display_name)}</h2>
+            <p class="muted">{'@' + escape(subscriber['username']) if subscriber['username'] else 'Chat ID: ' + escape(subscriber['chat_id'])}</p>
+          </div>
+          <a class="button secondary" href="/subscribers">К подписчикам</a>
         </div>
-        <a class="button secondary" href="/subscribers">Назад к подписчикам</a>
-      </div>
-      <div class="chat-thread">{bubbles or '<p class="muted">Истории переписки пока нет.</p>'}</div>
+        <div class="chat-thread">{bubbles or '<p class="muted">Истории переписки пока нет.</p>'}</div>
+        <form class="chat-compose" method="post" action="/subscriber/message">
+          <input type="hidden" name="chat_id" value="{escape(chat_id)}">
+          <label>Ответить клиенту<textarea name="text" required placeholder="Напишите ответ клиенту"></textarea></label>
+          <p><button>Отправить</button></p>
+        </form>
+      </section>
     </div>
-    <form class="panel chat-compose" method="post" action="/subscriber/message">
-      <input type="hidden" name="chat_id" value="{escape(chat_id)}">
-      <h2>Ответить клиенту</h2>
-      <label>Сообщение<textarea name="text" required placeholder="Напишите ответ клиенту"></textarea></label>
-      <p><button>Отправить</button></p>
-    </form>
     """
-    return layout(f"Чат: {display_name}", content, "subscribers", message)
+    return layout("Чаты", content, "chats", message)
 
 
 def login_page(message=""):
@@ -2764,8 +2814,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(statistics_page(query))
         elif path == "/broadcasts":
             self.send_html(broadcasts_page())
+        elif path == "/chats":
+            self.send_html(chats_page(query.get("chat_id", [""])[0]))
         elif path == "/subscriber/chat":
-            self.send_html(subscriber_chat_page(query.get("chat_id", [""])[0]))
+            self.send_html(chats_page(query.get("chat_id", [""])[0]))
         elif path == "/subscribers":
             self.send_html(subscribers_page())
         else:
@@ -2878,9 +2930,9 @@ class Handler(BaseHTTPRequestHandler):
             text = form_value(form, "text").strip()
             if text and chat_id:
                 ok = send_admin_message(chat_id, text)
-                self.send_html(subscriber_chat_page(chat_id, "Сообщение отправлено" if ok else "Не удалось отправить сообщение"))
+                self.send_html(chats_page(chat_id, "Сообщение отправлено" if ok else "Не удалось отправить сообщение"))
             else:
-                self.send_html(subscribers_page("Введите текст сообщения"), status=400)
+                self.send_html(chats_page(chat_id, "Введите текст сообщения"), status=400)
         elif path == "/subscriber/segment-message":
             form = parse_form(self)
             segment = form_value(form, "segment", "all")
