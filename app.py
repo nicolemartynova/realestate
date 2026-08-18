@@ -2088,8 +2088,8 @@ def app_projects_page(query=None, message=""):
 
 def app_project_card(project):
     cover = project_cover(project["id"])
-    discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
-    discount_label = f"<span>Ниже рынка на {discount}%</span>" if discount and discount > 0 else ""
+    deal_tags = app_deal_tags(project)
+    deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     return f"""
     <a class="lot-card" href="/app/lot?id={project['id']}">
       <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else 'Фото скоро появятся'}</div>
@@ -2100,11 +2100,24 @@ def app_project_card(project):
           <span>{escape(project['category'])}</span>
           <span>{escape(project['rooms'])}</span>
           <span>{escape(project['area'])}</span>
-          {discount_label}
+          {deal_labels}
         </div>
       </div>
     </a>
     """
+
+
+def app_deal_tags(project):
+    tags = []
+    market_discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+    original_discount = pct_below(project["price"], project["original_price"]) if project["original_price"] else None
+    if market_discount and market_discount > 0:
+        tags.append((f"Ниже рынка на {market_discount}%", "deal-tag"))
+    elif project["distress"] and original_discount and original_discount > 0:
+        tags.append((f"Ниже original price на {original_discount}%", "deal-tag"))
+    if project["distress"]:
+        tags.append(("Дистресс", "distress-tag"))
+    return tags
 
 
 def app_project_page(project_id, message=""):
@@ -2141,7 +2154,14 @@ def app_project_page(project_id, message=""):
         discount = pct_below(project["price"], project["market_price"])
         fact_html += f'<div class="fact"><small>Средняя цена рынка</small>{money(project["market_price"])} AED</div>'
         if discount and discount > 0:
-            fact_html += f'<div class="fact"><small>Ниже рынка</small>на {discount}%</div>'
+            fact_html += f'<div class="fact deal-tag"><small>Ниже рынка</small>на {discount}%</div>'
+    if project["distress"]:
+        fact_html += '<div class="fact distress-tag"><small>Дистресс</small>Да, специальное предложение</div>'
+        if project["original_price"]:
+            original_discount = pct_below(project["price"], project["original_price"])
+            fact_html += f'<div class="fact"><small>Original price</small>{money(project["original_price"])} AED</div>'
+            if original_discount and original_discount > 0:
+                fact_html += f'<div class="fact deal-tag"><small>Ниже original price</small>на {original_discount}%</div>'
     content = f"""
     <a class="back-link" href="/app">← Все лоты</a>
     <section class="lot-detail">
@@ -2332,6 +2352,8 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .lot-price { color:var(--accent); white-space:nowrap; }
 .lot-meta { display:flex; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:13px; }
 .lot-meta span { padding:4px 8px; background:#f4f7f5; border:1px solid var(--line); border-radius:999px; }
+.lot-meta .deal-tag, .deal-tag { background:#e7f2ec; border-color:#bcd8c9; color:#1f6b4d; font-weight:850; }
+.lot-meta .distress-tag, .distress-tag { background:#fff1df; border-color:#e6bd80; color:#915515; font-weight:900; }
 .lot-detail { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(320px,.65fr); gap:18px; align-items:start; }
 .gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .gallery-item { border-radius:8px; overflow:hidden; background:#e7ebe7; aspect-ratio:4/3; }
@@ -2341,6 +2363,8 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .detail-price { font-size:24px; color:var(--accent); font-weight:900; }
 .facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .fact { padding:10px; background:#f8faf8; border:1px solid var(--line); border-radius:7px; }
+.fact.deal-tag { background:#e7f2ec; border-color:#bcd8c9; color:#1f6b4d; }
+.fact.distress-tag { background:#fff1df; border-color:#e6bd80; color:#915515; }
 .fact small { display:block; color:var(--muted); font-weight:700; margin-bottom:2px; }
 .lead-form { display:grid; gap:10px; }
 .lead-form textarea { min-height:92px; resize:vertical; }
