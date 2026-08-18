@@ -72,6 +72,10 @@ EVENT_LABELS = {
     "click_personal_phone": "Персональный подбор: телефон",
     "click_personal_whatsapp": "Персональный подбор: WhatsApp",
     "click_language": "Выбор языка",
+    "click_filter_start": "Искать по фильтрам",
+    "click_filter_rooms": "Фильтр: выбрал комнаты",
+    "click_filter_district": "Фильтр: выбрал район",
+    "click_filter_reset": "Сбросил фильтры",
 }
 
 
@@ -160,6 +164,8 @@ def init_db():
               language text,
               state text,
               state_project_id integer,
+              filter_rooms text,
+              filter_district text,
               subscribed_at text not null,
               last_seen_at text,
               last_daily_sent_at text
@@ -252,6 +258,16 @@ def init_db():
               payload text,
               created_at text not null
             );
+
+            create table if not exists chat_messages (
+              id integer primary key autoincrement,
+              chat_id integer not null,
+              username text,
+              name text,
+              direction text not null,
+              text text not null,
+              created_at text not null
+            );
             """
         )
         ensure_column(conn, "projects", "tg_media_file_id", "text")
@@ -259,6 +275,8 @@ def init_db():
         ensure_column(conn, "projects", "tg_media_signature", "text")
         ensure_column(conn, "projects", "source_from", "text")
         ensure_column(conn, "subscribers", "language", "text")
+        ensure_column(conn, "subscribers", "filter_rooms", "text")
+        ensure_column(conn, "subscribers", "filter_district", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
 
@@ -813,11 +831,18 @@ def first_active_project():
 
 def next_project_for(chat_id, exclude_id=None):
     with db() as conn:
+        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
         params = [chat_id]
         extra = ""
         if exclude_id:
             extra = "and p.id != ?"
             params.append(exclude_id)
+        if sub and sub["filter_rooms"]:
+            extra += " and p.rooms = ?"
+            params.append(sub["filter_rooms"])
+        if sub and sub["filter_district"]:
+            extra += " and p.district = ?"
+            params.append(sub["filter_district"])
         return conn.execute(
             f"""
             select p.* from projects p
@@ -830,6 +855,59 @@ def next_project_for(chat_id, exclude_id=None):
         ).fetchone()
 
 
+def filtered_projects_counts(chat_id):
+    with db() as conn:
+        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
+        params = []
+        where = "where status = 'active'"
+        if sub and sub["filter_rooms"]:
+            where += " and rooms = ?"
+            params.append(sub["filter_rooms"])
+        if sub and sub["filter_district"]:
+            where += " and district = ?"
+            params.append(sub["filter_district"])
+        total = conn.execute(f"select count(*) c from projects {where}", params).fetchone()["c"]
+        unseen = conn.execute(
+            f"""
+            select count(*) c from projects p
+            left join seen_projects s on s.project_id = p.id and s.chat_id = ?
+            {where.replace('status', 'p.status').replace('rooms', 'p.rooms').replace('district', 'p.district')}
+              and s.project_id is null
+            """,
+            [chat_id] + params,
+        ).fetchone()["c"]
+        return total, unseen
+
+
+def subscriber_filters_active(chat_id):
+    with db() as conn:
+        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
+    return bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
+
+
+def active_rooms_options():
+    with db() as conn:
+        return [
+            row["rooms"]
+            for row in conn.execute(
+                "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
+            ).fetchall()
+        ]
+
+
+def active_district_options(rooms=None):
+    with db() as conn:
+        params = []
+        where = "where status='active' and district != ''"
+        if rooms:
+            where += " and rooms = ?"
+            params.append(rooms)
+        return [
+            row["district"]
+            for row in conn.execute(f"select distinct district from projects {where} order by district", params).fetchall()
+        ]
+
+
 def send_project(chat_id, project, user=None):
     started_at = time.perf_counter()
     if not project:
@@ -838,18 +916,24 @@ def send_project(chat_id, project, user=None):
         return False
     caption = project_caption(project)
     media = get_project_media(project["id"])
-    send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"]))
+    send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"], subscriber_filters_active(chat_id)))
     mark_seen(chat_id, project["id"])
     log_event(chat_id, user or {}, "project_sent", project_id=project["id"])
     log_perf("send_project", started_at, chat_id=chat_id, project_id=project["id"], media=len(media))
     return True
 
 
-def project_actions_keyboard(project_id):
+def project_actions_keyboard(project_id, filters_active=False):
+    filter_button = (
+        {"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}
+        if filters_active
+        else {"text": "🔎 Искать по фильтрам", "callback_data": "filter_start"}
+    )
     return inline_keyboard(
         [
             [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
             [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
+            [filter_button],
         ]
     )
 
@@ -867,6 +951,26 @@ def send_no_projects_message(chat_id):
     send_message(chat_id, text, keyboard=keyboard)
 
 
+def send_filter_rooms_prompt(chat_id):
+    rooms = active_rooms_options()
+    if not rooms:
+        send_no_projects_message(chat_id)
+        return
+    buttons = [[{"text": room, "callback_data": f"filter_rooms:{room}"}] for room in rooms[:20]]
+    buttons.append([{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}])
+    send_message(chat_id, "Выберите количество комнат:", keyboard=inline_keyboard(buttons))
+
+
+def send_filter_district_prompt(chat_id, rooms):
+    districts = active_district_options(rooms)
+    if not districts:
+        send_message(chat_id, "По выбранному количеству комнат сейчас нет активных районов.", keyboard=inline_keyboard([[{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}]]))
+        return
+    buttons = [[{"text": district, "callback_data": f"filter_district:{urllib.parse.quote(district)}"}] for district in districts[:30]]
+    buttons.append([{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}])
+    send_message(chat_id, "Теперь выберите район:", keyboard=inline_keyboard(buttons))
+
+
 def send_project_actions(chat_id, project_id):
     send_message(chat_id, ".", keyboard=project_actions_keyboard(project_id), parse_mode=None)
 
@@ -878,6 +982,104 @@ def notify_admin(text):
         send_message(chat_id, text)
         count += 1
     log_perf("notify_admin", started_at, admins=count)
+
+
+def save_chat_message(chat_id, user, direction, text):
+    with db() as conn:
+        conn.execute(
+            """
+            insert into chat_messages(chat_id, username, name, direction, text, created_at)
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                user.get("username") if user else None,
+                lead_name(user) if user else str(chat_id),
+                direction,
+                text,
+                iso_now(),
+            ),
+        )
+
+
+def handle_incoming_chat_message(chat_id, user, text):
+    save_chat_message(chat_id, user, "user", text)
+    notify_admin(
+        "\n".join(
+            [
+                "Новое сообщение от пользователя",
+                f"Клиент: {lead_name(user)}",
+                f"Telegram: @{user.get('username')}" if user.get("username") else f"Chat ID: {chat_id}",
+                f"Сообщение: {html.escape(text)}",
+            ]
+        )
+    )
+    send_message(chat_id, "Получили сообщение. Менеджер ответит вам здесь.")
+
+
+def send_admin_message(chat_id, text):
+    result = send_message(chat_id, text, parse_mode=None)
+    if result and result.get("ok"):
+        with db() as conn:
+            sub = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone()
+        user = (
+            {
+                "id": chat_id,
+                "username": sub["username"],
+                "first_name": sub["first_name"],
+                "last_name": sub["last_name"],
+            }
+            if sub
+            else {"id": chat_id}
+        )
+        save_chat_message(chat_id, user, "admin", text)
+        return True
+    return False
+
+
+def segment_subscribers(segment):
+    with db() as conn:
+        if segment == "active_7d":
+            return conn.execute(
+                "select * from subscribers where last_seen_at >= ? order by last_seen_at desc",
+                ((now_local() - timedelta(days=7)).replace(microsecond=0).isoformat(),),
+            ).fetchall()
+        if segment == "has_lot_leads":
+            return conn.execute(
+                """
+                select distinct s.* from subscribers s
+                join leads l on l.chat_id = s.chat_id
+                order by s.last_seen_at desc
+                """
+            ).fetchall()
+        if segment == "has_personal_leads":
+            return conn.execute(
+                """
+                select distinct s.* from subscribers s
+                join personal_leads l on l.chat_id = s.chat_id
+                order by s.last_seen_at desc
+                """
+            ).fetchall()
+        if segment == "clicked_interest":
+            return conn.execute(
+                """
+                select distinct s.* from subscribers s
+                join bot_events e on e.chat_id = s.chat_id
+                where e.event_type in ('click_interest', 'click_personal_interest', 'click_custom_interest')
+                order by s.last_seen_at desc
+                """
+            ).fetchall()
+        return conn.execute("select * from subscribers order by subscribed_at desc").fetchall()
+
+
+def send_segment_message(segment, text):
+    subscribers = segment_subscribers(segment)
+    count = 0
+    for sub in subscribers:
+        if send_admin_message(sub["chat_id"], text):
+            count += 1
+        time.sleep(0.05)
+    return count, len(subscribers)
 
 
 def upsert_subscriber(user, chat_id):
@@ -1067,7 +1269,7 @@ def handle_text(message):
             return
 
         if not sub["state_project_id"]:
-            send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
+            handle_incoming_chat_message(chat_id, user, text)
             return
 
         if sub["state"] == "awaiting_whatsapp":
@@ -1084,7 +1286,7 @@ def handle_text(message):
             send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
             return
 
-        send_message(chat_id, "Получил сообщение. Если хотите оставить заявку, выберите способ связи под объектом.")
+        handle_incoming_chat_message(chat_id, user, text)
     finally:
         log_perf("handle_text", started_at, chat_id=chat_id, has_contact=bool(contact), command=text[:24] if text.startswith("/") else "")
 
@@ -1113,6 +1315,39 @@ def handle_callback_inner(callback):
 
     if data == "start_view":
         log_event(chat_id, user, "click_start_view", payload=data)
+        send_project(chat_id, next_project_for(chat_id), user=user)
+        return
+
+    if data == "filter_start":
+        log_event(chat_id, user, "click_filter_start", payload=data)
+        with db() as conn:
+            conn.execute("update subscribers set filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+        send_filter_rooms_prompt(chat_id)
+        return
+
+    if data == "filter_reset":
+        log_event(chat_id, user, "click_filter_reset", payload=data)
+        with db() as conn:
+            conn.execute("update subscribers set filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+        send_message(chat_id, "Фильтры сброшены. Покажу актуальные лоты без ограничений.")
+        send_project(chat_id, next_project_for(chat_id), user=user)
+        return
+
+    if data.startswith("filter_rooms:"):
+        rooms = data.split(":", 1)[1]
+        log_event(chat_id, user, "click_filter_rooms", payload=rooms)
+        with db() as conn:
+            conn.execute("update subscribers set filter_rooms=?, filter_district=null where chat_id = ?", (rooms, chat_id))
+        send_filter_district_prompt(chat_id, rooms)
+        return
+
+    if data.startswith("filter_district:"):
+        district = urllib.parse.unquote(data.split(":", 1)[1])
+        log_event(chat_id, user, "click_filter_district", payload=district)
+        with db() as conn:
+            conn.execute("update subscribers set filter_district=? where chat_id = ?", (district, chat_id))
+        total, unseen = filtered_projects_counts(chat_id)
+        send_message(chat_id, f"Нашла подходящих вариантов: {total}. Ещё не просмотрено: {unseen}. Буду отправлять их по очереди.")
         send_project(chat_id, next_project_for(chat_id), user=user)
         return
 
@@ -2239,18 +2474,70 @@ def broadcasts_page(message=""):
     return layout("Рассылки", content, "broadcasts", message)
 
 
-def subscribers_page():
+def subscribers_page(message=""):
     with db() as conn:
         rows_data = conn.execute("select * from subscribers order by subscribed_at desc").fetchall()
+        chat_rows = conn.execute(
+            "select * from chat_messages order by created_at desc limit 80"
+        ).fetchall()
     rows = "".join(
-        f"<tr><td>{escape(s['chat_id'])}</td><td>{escape(s['first_name'])} {escape(s['last_name'])}<br><span class='muted'>@{escape(s['username'])}</span></td><td>{escape(s['subscribed_at'])}</td><td>{escape(s['last_daily_sent_at'])}</td></tr>"
+        f"""
+        <tr>
+          <td>{escape(s['chat_id'])}</td>
+          <td>{escape(s['first_name'])} {escape(s['last_name'])}<br><span class='muted'>@{escape(s['username'])}</span></td>
+          <td>{escape(s['subscribed_at'])}</td>
+          <td>{escape(s['last_seen_at'])}</td>
+          <td>
+            <form method="post" action="/subscriber/message" class="actions">
+              <input type="hidden" name="chat_id" value="{escape(s['chat_id'])}">
+              <input name="text" required placeholder="Сообщение пользователю">
+              <button>Отправить</button>
+            </form>
+          </td>
+        </tr>
+        """
         for s in rows_data
     )
-    empty = '<tr><td colspan="4" class="muted">Подписчиков пока нет.</td></tr>'
+    chat_history = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['created_at'])}</td>
+          <td>{escape('Админ → клиент' if row['direction'] == 'admin' else 'Клиент → админ')}</td>
+          <td><strong>{escape(row['name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span></td>
+          <td>{escape(row['text'])}</td>
+        </tr>
+        """
+        for row in chat_rows
+    )
+    empty = '<tr><td colspan="5" class="muted">Подписчиков пока нет.</td></tr>'
     return layout(
         "Подписчики",
-        f"<table><thead><tr><th>Chat ID</th><th>Имя</th><th>Подписался</th><th>Последняя дневная отправка</th></tr></thead><tbody>{rows or empty}</tbody></table>",
+        f"""
+        <form class="panel" method="post" action="/subscriber/segment-message">
+          <h2>Написать сегменту</h2>
+          <div class="form-grid">
+            <label>Сегмент<select name="segment">
+              <option value="all">Все подписчики</option>
+              <option value="active_7d">Активные за 7 дней</option>
+              <option value="clicked_interest">Нажимали интерес</option>
+              <option value="has_lot_leads">Оставляли заявку по лоту</option>
+              <option value="has_personal_leads">Оставляли персональный подбор</option>
+            </select></label>
+            <label class="wide">Сообщение<textarea name="text" required placeholder="Напишите сообщение, оно придёт пользователям в бот"></textarea></label>
+          </div>
+          <p><button>Отправить сегменту</button></p>
+        </form>
+        <div class="panel">
+          <h2>Подписчики</h2>
+          <div class="table-scroll"><table><thead><tr><th>Chat ID</th><th>Имя</th><th>Подписался</th><th>Последняя активность</th><th>Написать</th></tr></thead><tbody>{rows or empty}</tbody></table></div>
+        </div>
+        <div class="panel">
+          <h2>Последние сообщения</h2>
+          <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Направление</th><th>Пользователь</th><th>Сообщение</th></tr></thead><tbody>{chat_history or '<tr><td colspan="4" class="muted">Сообщений пока нет.</td></tr>'}</tbody></table></div>
+        </div>
+        """,
         "subscribers",
+        message,
     )
 
 
@@ -2538,6 +2825,24 @@ class Handler(BaseHTTPRequestHandler):
             with db() as conn:
                 conn.execute("delete from personal_leads where id = ?", (form_value(form, "id"),))
             self.redirect("/leads")
+        elif path == "/subscriber/message":
+            form = parse_form(self)
+            chat_id = form_value(form, "chat_id")
+            text = form_value(form, "text").strip()
+            if text and chat_id:
+                ok = send_admin_message(chat_id, text)
+                self.send_html(subscribers_page(f"Сообщение отправлено пользователю {chat_id}" if ok else f"Не удалось отправить сообщение пользователю {chat_id}"))
+            else:
+                self.send_html(subscribers_page("Введите текст сообщения"), status=400)
+        elif path == "/subscriber/segment-message":
+            form = parse_form(self)
+            segment = form_value(form, "segment", "all")
+            text = form_value(form, "text").strip()
+            if not text:
+                self.send_html(subscribers_page("Введите текст сообщения"), status=400)
+                return
+            count, total = send_segment_message(segment, text)
+            self.send_html(subscribers_page(f"Отправлено: {count} из {total}"))
         elif path == "/broadcast/create":
             form = parse_form(self)
             send_at_raw = form_value(form, "send_at")
