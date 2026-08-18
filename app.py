@@ -76,6 +76,7 @@ EVENT_LABELS = {
     "click_filter_rooms": "Фильтр: выбрал комнаты",
     "click_filter_district": "Фильтр: выбрал район",
     "click_filter_reset": "Сбросил фильтры",
+    "click_filter_view_all": "Фильтр: смотреть без фильтров",
     "click_filter_show_seen": "Фильтр: показать просмотренные",
 }
 
@@ -941,6 +942,20 @@ def offer_filter_change(chat_id, total):
     )
 
 
+def offer_after_filter_reset(chat_id):
+    keyboard = inline_keyboard(
+        [
+            [{"text": "👀 Смотреть без фильтров", "callback_data": "filter_view_all"}],
+            [{"text": "🔎 Применить другие фильтры", "callback_data": "filter_start"}],
+        ]
+    )
+    send_message(
+        chat_id,
+        "Фильтры сброшены. Как продолжим?",
+        keyboard=keyboard,
+    )
+
+
 def subscriber_filters_active(chat_id):
     with db() as conn:
         sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
@@ -1397,7 +1412,14 @@ def handle_callback_inner(callback):
         log_event(chat_id, user, "click_filter_reset", payload=data)
         with db() as conn:
             conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
-        send_message(chat_id, "Фильтры сброшены. Покажу актуальные лоты без ограничений.")
+        offer_after_filter_reset(chat_id)
+        return
+
+    if data == "filter_view_all":
+        log_event(chat_id, user, "click_filter_view_all", payload=data)
+        with db() as conn:
+            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+        send_message(chat_id, "Показываю актуальные лоты без фильтров.")
         send_project(chat_id, next_project_for(chat_id), user=user)
         return
 
