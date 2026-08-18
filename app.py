@@ -1824,10 +1824,10 @@ def layout(title, content, active="projects", message=""):
         ("projects", "/", "Объекты"),
         ("new", "/project/new", "Добавить"),
         ("leads", "/leads", "Заявки"),
+        ("chats", "/chats", "Чаты"),
         ("stats", "/stats", "Статистика"),
         ("broadcasts", "/broadcasts", "Рассылки"),
         ("subscribers", "/subscribers", "Подписчики"),
-        ("chats", "/chats", "Чаты"),
     ]
     links = "".join(
         f'<a class="{ "active" if active == key else "" }" href="{href}">{label}</a>'
@@ -1924,7 +1924,7 @@ textarea { min-height:110px; resize:vertical; }
 .login form { width:min(420px,calc(100vw - 32px)); background:#fff; border:1px solid var(--line); border-radius:8px; padding:26px; display:grid; gap:14px; }
 .login h1 { font-size:24px; }
 .muted { color:var(--muted); }
-@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { min-height:auto; } .chat-shell { min-height:70vh; } }
+@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { min-height:auto; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { min-height:70vh; } }
 """
 
 
@@ -2611,7 +2611,7 @@ def chats_page(chat_id="", message=""):
         for row in messages
     )
     content = f"""
-    <div class="chat-layout">
+    <div class="chat-layout active-chat">
       <section class="panel chat-sidebar">
         <h2>Диалоги</h2>
         <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Диалогов пока нет.</p>'}</div>
