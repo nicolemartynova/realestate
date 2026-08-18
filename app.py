@@ -76,6 +76,7 @@ EVENT_LABELS = {
     "click_filter_rooms": "Фильтр: выбрал комнаты",
     "click_filter_district": "Фильтр: выбрал район",
     "click_filter_reset": "Сбросил фильтры",
+    "click_filter_show_seen": "Фильтр: показать просмотренные",
 }
 
 
@@ -831,7 +832,7 @@ def first_active_project():
         ).fetchone()
 
 
-def next_project_for(chat_id, exclude_id=None):
+def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False):
     with db() as conn:
         sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
         has_filters = bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
@@ -856,7 +857,7 @@ def next_project_for(chat_id, exclude_id=None):
             """,
             params,
         ).fetchone()
-        if project or not has_filters:
+        if project or not has_filters or not include_seen_filtered:
             return project
 
         params = []
@@ -925,10 +926,31 @@ def filtered_projects_counts(chat_id):
         return total, unseen
 
 
+def offer_filter_change(chat_id, total):
+    keyboard = inline_keyboard(
+        [
+            [{"text": "🔎 Изменить фильтры", "callback_data": "filter_start"}],
+            [{"text": "👀 Показать просмотренные", "callback_data": "filter_show_seen"}],
+            [{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}],
+        ]
+    )
+    send_message(
+        chat_id,
+        f"По выбранным фильтрам все {total} лотов уже просмотрены. Можем изменить фильтры или показать эти лоты повторно.",
+        keyboard=keyboard,
+    )
+
+
 def subscriber_filters_active(chat_id):
     with db() as conn:
         sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
     return bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
+
+
+def subscriber_repeats_seen_filters(chat_id):
+    with db() as conn:
+        sub = conn.execute("select state from subscribers where chat_id = ?", (chat_id,)).fetchone()
+    return bool(sub and sub["state"] == "filter_show_seen")
 
 
 def active_rooms_options():
@@ -1367,23 +1389,30 @@ def handle_callback_inner(callback):
     if data == "filter_start":
         log_event(chat_id, user, "click_filter_start", payload=data)
         with db() as conn:
-            conn.execute("update subscribers set filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
         send_filter_rooms_prompt(chat_id)
         return
 
     if data == "filter_reset":
         log_event(chat_id, user, "click_filter_reset", payload=data)
         with db() as conn:
-            conn.execute("update subscribers set filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
         send_message(chat_id, "Фильтры сброшены. Покажу актуальные лоты без ограничений.")
         send_project(chat_id, next_project_for(chat_id), user=user)
+        return
+
+    if data == "filter_show_seen":
+        log_event(chat_id, user, "click_filter_show_seen", payload=data)
+        with db() as conn:
+            conn.execute("update subscribers set state='filter_show_seen' where chat_id = ?", (chat_id,))
+        send_project(chat_id, next_project_for(chat_id, include_seen_filtered=True), user=user)
         return
 
     if data.startswith("filter_rooms:"):
         rooms = data.split(":", 1)[1]
         log_event(chat_id, user, "click_filter_rooms", payload=rooms)
         with db() as conn:
-            conn.execute("update subscribers set filter_rooms=?, filter_district=null where chat_id = ?", (rooms, chat_id))
+            conn.execute("update subscribers set state=null, filter_rooms=?, filter_district=null where chat_id = ?", (rooms, chat_id))
         send_filter_district_prompt(chat_id, rooms)
         return
 
@@ -1391,10 +1420,13 @@ def handle_callback_inner(callback):
         district = urllib.parse.unquote(data.split(":", 1)[1])
         log_event(chat_id, user, "click_filter_district", payload=district)
         with db() as conn:
-            conn.execute("update subscribers set filter_district=? where chat_id = ?", (district, chat_id))
+            conn.execute("update subscribers set state=null, filter_district=? where chat_id = ?", (district, chat_id))
         total, unseen = filtered_projects_counts(chat_id)
-        send_message(chat_id, f"Нашла подходящих вариантов: {total}. Новых для просмотра: {unseen}. Если новых нет, покажу подходящие лоты повторно.")
-        send_project(chat_id, next_project_for(chat_id), user=user)
+        if total and not unseen:
+            offer_filter_change(chat_id, total)
+        else:
+            send_message(chat_id, f"Нашла подходящих вариантов: {total}. Новых для просмотра: {unseen}. Буду отправлять их по очереди.")
+            send_project(chat_id, next_project_for(chat_id), user=user)
         return
 
     if data == "personal_interest":
@@ -1451,7 +1483,23 @@ def handle_callback_inner(callback):
 
     if action == "next":
         log_event(chat_id, user, "click_next", project_id=project_id, payload=data)
-        next_project = next_project_for(chat_id, exclude_id=project_id)
+        repeat_seen_filters = subscriber_repeats_seen_filters(chat_id)
+        if subscriber_filters_active(chat_id):
+            total, unseen = filtered_projects_counts(chat_id)
+            if total and not unseen and not repeat_seen_filters:
+                notify_admin(
+                    "\n".join(
+                        [
+                            "Клик «Смотреть еще»",
+                            f"Клиент: {lead_name(user)}",
+                            f"Telegram: @{user.get('username')}" if user.get("username") else f"Chat ID: {chat_id}",
+                            "По фильтрам новых лотов нет, предложено изменить фильтры",
+                        ]
+                    )
+                )
+                offer_filter_change(chat_id, total)
+                return
+        next_project = next_project_for(chat_id, exclude_id=project_id, include_seen_filtered=repeat_seen_filters)
         notify_admin(
             "\n".join(
                 [
