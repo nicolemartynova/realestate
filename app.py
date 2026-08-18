@@ -379,11 +379,10 @@ def telegram_api(method, payload):
     if not BOT_TOKEN:
         return None
     started_at = time.perf_counter()
-    body = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as res:
@@ -493,6 +492,21 @@ def send_message(chat_id, text, keyboard=None, parse_mode="HTML"):
     if keyboard:
         payload["reply_markup"] = keyboard
     return telegram_api("sendMessage", payload)
+
+
+def configure_bot_menu_button():
+    if not PUBLIC_BASE_URL:
+        return
+    telegram_api(
+        "setChatMenuButton",
+        {
+            "menu_button": {
+                "type": "web_app",
+                "text": "Каталог",
+                "web_app": {"url": f"{PUBLIC_BASE_URL}/app"},
+            }
+        },
+    )
 
 
 def send_media(chat_id, media_row):
@@ -1034,7 +1048,7 @@ def project_actions_keyboard(project_id, filters_active=False):
         [filter_button],
     ]
     if PUBLIC_BASE_URL:
-        rows.append([{"text": "🏙 Открыть каталог", "url": f"{PUBLIC_BASE_URL}/app"}])
+        rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app"}}])
     return inline_keyboard(
         rows
     )
@@ -3544,6 +3558,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
+    configure_bot_menu_button()
     stop_event = threading.Event()
     bot_thread = threading.Thread(target=bot_loop, args=(stop_event,), daemon=True)
     scheduler_thread = threading.Thread(target=scheduler_loop, args=(stop_event,), daemon=True)
