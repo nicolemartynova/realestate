@@ -1903,6 +1903,8 @@ textarea { min-height:110px; resize:vertical; }
 .chat-layout { display:grid; grid-template-columns:320px minmax(0,1fr); gap:16px; height:calc(100vh - 150px); min-height:520px; }
 .chat-sidebar { padding:0; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
 .chat-sidebar h2 { margin:0; padding:18px 18px 12px; }
+.chat-search { display:flex; gap:8px; padding:0 14px 14px; border-bottom:1px solid var(--line); }
+.chat-search input { min-width:0; }
 .chat-list { flex:1; min-height:0; overflow:auto; border-top:1px solid var(--line); }
 .chat-list a { display:block; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--text); text-decoration:none; }
 .chat-list a.active, .chat-list a:hover { background:#eef4f0; }
@@ -2550,34 +2552,38 @@ def chat_display_name(row):
     ) or row["username"] or str(row["chat_id"])
 
 
-def chats_page(chat_id="", message=""):
+def chat_search_text(row):
+    return " ".join(
+        str(part)
+        for part in [
+            row["chat_id"],
+            row["username"],
+            row["first_name"],
+            row["last_name"],
+            chat_display_name(row),
+            row["contact_values"],
+            row["contact_names"],
+        ]
+        if part
+    ).casefold()
+
+
+def chats_page(chat_id="", message="", search=""):
+    search = (search or "").strip()
     with db() as conn:
-        if not chat_id:
-            first_conversation = conn.execute(
-                """
-                select s.chat_id
-                from subscribers s
-                left join chat_messages cm on cm.id = (
-                  select id from chat_messages
-                  where chat_id = s.chat_id
-                  order by created_at desc, id desc
-                  limit 1
-                )
-                order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
-                limit 1
-                """
-            ).fetchone()
-            if first_conversation:
-                chat_id = str(first_conversation["chat_id"])
-        if chat_id:
-            conn.execute("update subscribers set chat_read_at = ? where chat_id = ?", (iso_now(), chat_id))
-        conversations = conn.execute(
+        conversations_all = conn.execute(
             """
             select
               s.*,
               cm.text last_text,
               cm.direction last_direction,
               cm.created_at last_message_at,
+              coalesce((select group_concat(contact_value, ' ') from leads where chat_id = s.chat_id), '') ||
+                ' ' || coalesce((select group_concat(contact_value, ' ') from custom_broadcast_leads where chat_id = s.chat_id), '') ||
+                ' ' || coalesce((select group_concat(contact_value, ' ') from personal_leads where chat_id = s.chat_id), '') contact_values,
+              coalesce((select group_concat(name, ' ') from leads where chat_id = s.chat_id), '') ||
+                ' ' || coalesce((select group_concat(name, ' ') from custom_broadcast_leads where chat_id = s.chat_id), '') ||
+                ' ' || coalesce((select group_concat(name, ' ') from personal_leads where chat_id = s.chat_id), '') contact_names,
               (select count(*) from chat_messages where chat_id = s.chat_id) message_count,
               (
                 select count(*)
@@ -2596,15 +2602,67 @@ def chats_page(chat_id="", message=""):
             order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
             """
         ).fetchall()
+        conversations = [
+            row for row in conversations_all
+            if not search or search.casefold() in chat_search_text(row)
+        ]
+        if not chat_id and conversations:
+            chat_id = str(conversations[0]["chat_id"])
+        if chat_id:
+            conn.execute("update subscribers set chat_read_at = ? where chat_id = ?", (iso_now(), chat_id))
+            conversations_all = conn.execute(
+                """
+                select
+                  s.*,
+                  cm.text last_text,
+                  cm.direction last_direction,
+                  cm.created_at last_message_at,
+                  coalesce((select group_concat(contact_value, ' ') from leads where chat_id = s.chat_id), '') ||
+                    ' ' || coalesce((select group_concat(contact_value, ' ') from custom_broadcast_leads where chat_id = s.chat_id), '') ||
+                    ' ' || coalesce((select group_concat(contact_value, ' ') from personal_leads where chat_id = s.chat_id), '') contact_values,
+                  coalesce((select group_concat(name, ' ') from leads where chat_id = s.chat_id), '') ||
+                    ' ' || coalesce((select group_concat(name, ' ') from custom_broadcast_leads where chat_id = s.chat_id), '') ||
+                    ' ' || coalesce((select group_concat(name, ' ') from personal_leads where chat_id = s.chat_id), '') contact_names,
+                  (select count(*) from chat_messages where chat_id = s.chat_id) message_count,
+                  (
+                    select count(*)
+                    from chat_messages unread
+                    where unread.chat_id = s.chat_id
+                      and unread.direction = 'user'
+                      and (s.chat_read_at is null or unread.created_at > s.chat_read_at)
+                  ) unread_count
+                from subscribers s
+                left join chat_messages cm on cm.id = (
+                  select id from chat_messages
+                  where chat_id = s.chat_id
+                  order by created_at desc, id desc
+                  limit 1
+                )
+                order by coalesce(cm.created_at, s.last_seen_at, s.subscribed_at) desc
+                """
+            ).fetchall()
+            conversations = [
+                row for row in conversations_all
+                if not search or search.casefold() in chat_search_text(row)
+            ]
         subscriber = conn.execute("select * from subscribers where chat_id = ?", (chat_id,)).fetchone() if chat_id else None
         messages = conn.execute(
             "select * from chat_messages where chat_id = ? order by created_at asc",
             (chat_id,),
         ).fetchall() if subscriber else []
 
+    search_query = urllib.parse.urlencode({"q": search}) if search else ""
+    search_suffix = f"&{search_query}" if search_query else ""
+    search_form = f"""
+    <form class="chat-search" method="get" action="/chats">
+      <input name="q" value="{escape(search)}" placeholder="Имя, username, телефон, WhatsApp, Chat ID">
+      <button>Найти</button>
+      {f'<a class="button secondary" href="/chats">Сбросить</a>' if search else ''}
+    </form>
+    """
     dialog_rows = "".join(
         f"""
-        <a class="{'active' if str(row['chat_id']) == str(chat_id) else ''}" href="/chats?chat_id={escape(row['chat_id'])}">
+        <a class="{'active' if str(row['chat_id']) == str(chat_id) else ''}" href="/chats?chat_id={escape(row['chat_id'])}{search_suffix}">
           <div class="chat-list-title">
             <strong>{escape(chat_display_name(row))}</strong>
             {f'<span class="unread-badge">{row["unread_count"]}</span>' if row["unread_count"] else ''}
@@ -2621,10 +2679,11 @@ def chats_page(chat_id="", message=""):
         <div class="chat-layout">
           <section class="panel chat-sidebar">
             <h2>Диалоги</h2>
-            <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Диалогов пока нет.</p>'}</div>
+            {search_form}
+            <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Ничего не найдено.</p>'}</div>
           </section>
           <section class="panel chat-shell">
-            <div class="chat-header"><div><h2>Выберите чат</h2><p class="muted">Откройте диалог из списка слева.</p></div></div>
+            <div class="chat-header"><div><h2>Выберите чат</h2><p class="muted">Откройте диалог из списка слева или найдите клиента по контакту.</p></div></div>
             <div class="chat-thread"></div>
           </section>
         </div>
@@ -2645,6 +2704,7 @@ def chats_page(chat_id="", message=""):
     <div class="chat-layout active-chat">
       <section class="panel chat-sidebar">
         <h2>Диалоги</h2>
+        {search_form}
         <div class="chat-list">{dialog_rows or '<p class="muted" style="padding:0 18px 18px">Диалогов пока нет.</p>'}</div>
       </section>
       <section class="panel chat-shell">
@@ -2846,9 +2906,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/broadcasts":
             self.send_html(broadcasts_page())
         elif path == "/chats":
-            self.send_html(chats_page(query.get("chat_id", [""])[0]))
+            self.send_html(chats_page(query.get("chat_id", [""])[0], search=query.get("q", [""])[0]))
         elif path == "/subscriber/chat":
-            self.send_html(chats_page(query.get("chat_id", [""])[0]))
+            self.send_html(chats_page(query.get("chat_id", [""])[0], search=query.get("q", [""])[0]))
         elif path == "/subscribers":
             self.send_html(subscribers_page())
         else:
