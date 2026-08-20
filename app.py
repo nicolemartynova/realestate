@@ -57,6 +57,13 @@ LEAD_STATUSES = [
     ("lost", "Неактуальна"),
 ]
 LEAD_STATUS_LABELS = dict(LEAD_STATUSES)
+SUBSCRIBER_STATUSES = [
+    ("active", "Активен"),
+    ("blocked", "Заблокировал бота"),
+    ("deactivated", "Аккаунт удалён"),
+    ("unreachable", "Недоступен"),
+]
+SUBSCRIBER_STATUS_LABELS = dict(SUBSCRIBER_STATUSES)
 EVENT_LABELS = {
     "click_start_view": "Начал смотреть лоты",
     "click_next": "Смотреть ещё",
@@ -177,6 +184,10 @@ def init_db():
               last_seen_at text,
               last_daily_sent_at text,
               daily_sent_slots text,
+              delivery_status text not null default 'active',
+              last_delivery_at text,
+              last_delivery_error_at text,
+              last_delivery_error text,
               chat_read_at text
             );
 
@@ -312,6 +323,10 @@ def init_db():
         ensure_column(conn, "subscribers", "filter_district", "text")
         ensure_column(conn, "subscribers", "chat_read_at", "text")
         ensure_column(conn, "subscribers", "daily_sent_slots", "text")
+        ensure_column(conn, "subscribers", "delivery_status", "text not null default 'active'")
+        ensure_column(conn, "subscribers", "last_delivery_at", "text")
+        ensure_column(conn, "subscribers", "last_delivery_error_at", "text")
+        ensure_column(conn, "subscribers", "last_delivery_error", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
@@ -410,6 +425,12 @@ def telegram_api(method, payload):
             if method != "getUpdates":
                 log_perf("telegram_api", started_at, method=method, ok=result.get("ok"))
             return result
+    except urllib.error.HTTPError as err:
+        log_perf("telegram_api_http_error", started_at, method=method, status=err.code)
+        try:
+            return json.loads(err.read().decode())
+        except Exception:
+            return {"ok": False, "error_code": err.code, "description": str(err)}
     except Exception:
         log_perf("telegram_api_error", started_at, method=method)
         traceback.print_exc()
@@ -464,11 +485,13 @@ def telegram_api_multipart_files(method, fields, files):
     except urllib.error.HTTPError as err:
         log_perf("telegram_api_multipart_http_error", started_at, method=method, files=len(files), bytes=len(body))
         try:
-            print(err.read().decode(), file=sys.stderr)
+            body = err.read().decode()
+            print(body, file=sys.stderr)
+            return json.loads(body)
         except Exception:
             pass
         traceback.print_exc()
-        return None
+        return {"ok": False, "error_code": err.code, "description": str(err)}
     except Exception:
         log_perf("telegram_api_multipart_error", started_at, method=method, files=len(files), bytes=len(body))
         traceback.print_exc()
@@ -511,7 +534,53 @@ def send_message(chat_id, text, keyboard=None, parse_mode="HTML"):
         payload["parse_mode"] = parse_mode
     if keyboard:
         payload["reply_markup"] = keyboard
-    return telegram_api("sendMessage", payload)
+    result = telegram_api("sendMessage", payload)
+    update_delivery_status(chat_id, result)
+    return result
+
+
+def classify_delivery_error(result):
+    description = (result or {}).get("description", "")
+    lowered = description.lower()
+    if "blocked by the user" in lowered or "bot was blocked" in lowered:
+        return "blocked"
+    if "user is deactivated" in lowered:
+        return "deactivated"
+    if "chat not found" in lowered or "forbidden" in lowered:
+        return "unreachable"
+    return "unreachable"
+
+
+def update_delivery_status(chat_id, result):
+    if not chat_id or result is None:
+        return
+    now = iso_now()
+    if result.get("ok"):
+        with db() as conn:
+            conn.execute(
+                """
+                update subscribers
+                set delivery_status='active',
+                    last_delivery_at=?,
+                    last_delivery_error=null
+                where chat_id=?
+                """,
+                (now, chat_id),
+            )
+        return
+    status = classify_delivery_error(result)
+    description = result.get("description") or json.dumps(result, ensure_ascii=False)
+    with db() as conn:
+        conn.execute(
+            """
+            update subscribers
+            set delivery_status=?,
+                last_delivery_error_at=?,
+                last_delivery_error=?
+            where chat_id=?
+            """,
+            (status, now, description, chat_id),
+        )
 
 
 def configure_bot_menu_button():
@@ -1053,7 +1122,11 @@ def send_project(chat_id, project, user=None):
         return False
     caption = project_caption(project)
     media = get_project_media(project["id"])
-    send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"], subscriber_filters_active(chat_id)))
+    result = send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"], subscriber_filters_active(chat_id)))
+    update_delivery_status(chat_id, result)
+    if not result or not result.get("ok"):
+        log_perf("send_project", started_at, chat_id=chat_id, project_id=project["id"], ok=False)
+        return False
     mark_seen(chat_id, project["id"])
     log_event(chat_id, user or {}, "project_sent", project_id=project["id"])
     log_perf("send_project", started_at, chat_id=chat_id, project_id=project["id"], media=len(media))
@@ -1233,7 +1306,9 @@ def segment_subscribers(segment):
                 order by s.last_seen_at desc
                 """
             ).fetchall()
-        return conn.execute("select * from subscribers order by subscribed_at desc").fetchall()
+        return conn.execute(
+            "select * from subscribers where coalesce(delivery_status, 'active') = 'active' order by subscribed_at desc"
+        ).fetchall()
 
 
 def send_segment_message(segment, text):
@@ -1257,7 +1332,8 @@ def upsert_subscriber(user, chat_id):
               username=excluded.username,
               first_name=excluded.first_name,
               last_name=excluded.last_name,
-              last_seen_at=excluded.last_seen_at
+              last_seen_at=excluded.last_seen_at,
+              delivery_status='active'
             """,
             (
                 chat_id,
@@ -1708,7 +1784,7 @@ def send_to_all(project_id):
         return 0
     count = 0
     with db() as conn:
-        subscribers = conn.execute("select chat_id from subscribers").fetchall()
+        subscribers = conn.execute("select chat_id from subscribers where coalesce(delivery_status, 'active') = 'active'").fetchall()
     for sub in subscribers:
         if send_project(sub["chat_id"], project):
             count += 1
@@ -1728,39 +1804,46 @@ def send_custom_to_all(broadcast_id, text, media_items):
     count = 0
     safe_text = html.escape(text)
     with db() as conn:
-        subscribers = conn.execute("select chat_id from subscribers").fetchall()
+        subscribers = conn.execute("select chat_id from subscribers where coalesce(delivery_status, 'active') = 'active'").fetchall()
     for sub in subscribers:
         chat_id = sub["chat_id"]
         sent = False
+        delivery_result = None
         keyboard = custom_broadcast_keyboard(broadcast_id)
         if media_items:
             caption = safe_text if len(safe_text) <= 1024 else None
             if len(safe_text) > 1024:
-                sent = bool(send_message(chat_id, safe_text, keyboard=keyboard))
+                delivery_result = send_message(chat_id, safe_text, keyboard=keyboard)
+                sent = bool(delivery_result and delivery_result.get("ok"))
             if len(media_items) == 1:
                 if caption:
-                    sent = bool(
-                        telegram_api_multipart(
-                            "sendVideo" if media_items[0]["mime_type"].startswith("video/") else "sendPhoto",
-                            {
-                                "chat_id": chat_id,
-                                "caption": media_caption(caption),
-                                "parse_mode": "HTML",
-                                "reply_markup": keyboard,
-                            },
-                            "video" if media_items[0]["mime_type"].startswith("video/") else "photo",
-                            media_items[0]["path"],
-                            media_items[0]["mime_type"],
-                        )
-                    ) or sent
+                    delivery_result = telegram_api_multipart(
+                        "sendVideo" if media_items[0]["mime_type"].startswith("video/") else "sendPhoto",
+                        {
+                            "chat_id": chat_id,
+                            "caption": media_caption(caption),
+                            "parse_mode": "HTML",
+                            "reply_markup": keyboard,
+                        },
+                        "video" if media_items[0]["mime_type"].startswith("video/") else "photo",
+                        media_items[0]["path"],
+                        media_items[0]["mime_type"],
+                    )
+                    update_delivery_status(chat_id, delivery_result)
+                    sent = bool(delivery_result and delivery_result.get("ok")) or sent
                 else:
-                    sent = bool(send_media_path(chat_id, media_items[0]["path"], media_items[0]["mime_type"])) or sent
+                    delivery_result = send_media_path(chat_id, media_items[0]["path"], media_items[0]["mime_type"])
+                    update_delivery_status(chat_id, delivery_result)
+                    sent = bool(delivery_result and delivery_result.get("ok")) or sent
             else:
-                sent = bool(send_media_album_paths(chat_id, media_items, caption=caption)) or sent
+                delivery_result = send_media_album_paths(chat_id, media_items, caption=caption)
+                update_delivery_status(chat_id, delivery_result)
+                sent = bool(delivery_result and delivery_result.get("ok")) or sent
                 if caption:
                     send_message(chat_id, "Подробнее:", keyboard=keyboard, parse_mode=None)
         else:
-            sent = bool(send_message(chat_id, safe_text, keyboard=keyboard))
+            delivery_result = send_message(chat_id, safe_text, keyboard=keyboard)
+            sent = bool(delivery_result and delivery_result.get("ok"))
         if sent:
             count += 1
         time.sleep(0.05)
@@ -1848,7 +1931,7 @@ def scheduler_loop(stop_event):
                         )
 
                 with db() as conn:
-                    subscribers = conn.execute("select * from subscribers").fetchall()
+                    subscribers = conn.execute("select * from subscribers where coalesce(delivery_status, 'active') = 'active'").fetchall()
                 today = moment.date().isoformat()
                 for sub in subscribers:
                     sent_slots = sent_daily_slots(sub["daily_sent_slots"], today)
@@ -2387,6 +2470,7 @@ def layout(title, content, active="projects", message=""):
         ("leads", "/leads", "Заявки"),
         ("chats", "/chats", "Чаты"),
         ("stats", "/stats", "Статистика"),
+        ("subscriber_stats", "/subscribers/stats", "Стата подписчиков"),
         ("broadcasts", "/broadcasts", "Рассылки"),
         ("subscribers", "/subscribers", "Подписчики"),
     ]
@@ -2978,6 +3062,274 @@ def build_statistics_xlsx(period):
     )
 
 
+def subscriber_status_label(status):
+    return SUBSCRIBER_STATUS_LABELS.get(status or "active", status or "Активен")
+
+
+def subscriber_identity(row):
+    name = " ".join(part for part in [row["first_name"], row["last_name"]] if part).strip()
+    return name or row["username"] or str(row["chat_id"])
+
+
+def has_leads_sql(alias="s"):
+    return f"""
+        exists(select 1 from leads l where l.chat_id = {alias}.chat_id)
+        or exists(select 1 from personal_leads pl where pl.chat_id = {alias}.chat_id)
+        or exists(select 1 from custom_broadcast_leads cl where cl.chat_id = {alias}.chat_id)
+        or exists(select 1 from catalog_events cel where cel.chat_id = {alias}.chat_id and cel.event_type = 'catalog_lead')
+    """
+
+
+def get_subscriber_statistics_data(period):
+    start_at = period["start_at"]
+    end_at = period["end_at"]
+    subscriber_filter, subscriber_params = period_condition("subscribed_at", start_at, end_at)
+    seen_filter, seen_params = period_condition("seen_at", start_at, end_at)
+    catalog_filter, catalog_params = period_condition("created_at", start_at, end_at)
+    bot_event_filter, bot_event_params = period_condition("created_at", start_at, end_at)
+    message_filter, message_params = period_condition("created_at", start_at, end_at)
+    lead_filter, lead_params = period_condition("created_at", start_at, end_at)
+    inactive_before = (now_local() - timedelta(days=30)).replace(microsecond=0).isoformat()
+    lead_union = f"""
+        select chat_id from leads where 1=1{lead_filter}
+        union all select chat_id from personal_leads where 1=1{lead_filter}
+        union all select chat_id from custom_broadcast_leads where 1=1{lead_filter}
+        union all select chat_id from catalog_events where event_type='catalog_lead' and chat_id is not null{catalog_filter}
+    """
+    with db() as conn:
+        status_counts = {
+            row["delivery_status"] or "active": row["c"]
+            for row in conn.execute(
+                "select coalesce(delivery_status, 'active') delivery_status, count(*) c from subscribers group by coalesce(delivery_status, 'active')"
+            ).fetchall()
+        }
+        overview = {
+            "total": conn.execute("select count(*) c from subscribers").fetchone()["c"],
+            "active": status_counts.get("active", 0),
+            "blocked": status_counts.get("blocked", 0),
+            "deactivated": status_counts.get("deactivated", 0),
+            "unreachable": status_counts.get("unreachable", 0),
+            "new": conn.execute(f"select count(*) c from subscribers where 1=1{subscriber_filter}", subscriber_params).fetchone()["c"],
+            "catalog_users": conn.execute(
+                f"select count(distinct chat_id) c from catalog_events where chat_id is not null and event_type='catalog_open'{catalog_filter}",
+                catalog_params,
+            ).fetchone()["c"],
+            "lead_users": conn.execute(f"select count(distinct chat_id) c from ({lead_union})", lead_params * 3 + catalog_params).fetchone()["c"],
+            "chat_users": conn.execute(
+                f"select count(distinct chat_id) c from chat_messages where direction='user'{message_filter}",
+                message_params,
+            ).fetchone()["c"],
+            "avg_seen": conn.execute(
+                f"select avg(c) c from (select count(*) c from seen_projects where 1=1{seen_filter} group by chat_id)",
+                seen_params,
+            ).fetchone()["c"] or 0,
+        }
+        segments = {
+            "active_no_leads": conn.execute(
+                f"select count(*) c from subscribers s where coalesce(s.delivery_status, 'active')='active' and not ({has_leads_sql('s')})"
+            ).fetchone()["c"],
+            "viewed_no_leads": conn.execute(
+                f"""
+                select count(distinct s.chat_id) c
+                from subscribers s
+                join seen_projects sp on sp.chat_id = s.chat_id
+                where not ({has_leads_sql('s')}){seen_filter.replace('seen_at', 'sp.seen_at')}
+                """,
+                seen_params,
+            ).fetchone()["c"],
+            "catalog_no_leads": conn.execute(
+                f"""
+                select count(distinct s.chat_id) c
+                from subscribers s
+                join catalog_events ce on ce.chat_id = s.chat_id and ce.event_type = 'catalog_open'
+                where not ({has_leads_sql('s')}){catalog_filter.replace('created_at', 'ce.created_at')}
+                """,
+                catalog_params,
+            ).fetchone()["c"],
+            "blocked": overview["blocked"],
+            "inactive_30d": conn.execute(
+                "select count(*) c from subscribers where last_seen_at is null or last_seen_at < ?",
+                (inactive_before,),
+            ).fetchone()["c"],
+        }
+        rows_raw = conn.execute(
+            f"""
+            select
+              s.*,
+              (select count(*) from seen_projects sp where sp.chat_id = s.chat_id{seen_filter.replace('seen_at', 'sp.seen_at')}) tg_views,
+              (select count(*) from catalog_events ce where ce.chat_id = s.chat_id and ce.event_type='catalog_open'{catalog_filter.replace('created_at', 'ce.created_at')}) catalog_opens,
+              (select count(*) from catalog_events ce where ce.chat_id = s.chat_id and ce.event_type='catalog_lot_view'{catalog_filter.replace('created_at', 'ce.created_at')}) catalog_views,
+              (select count(*) from leads l where l.chat_id = s.chat_id{lead_filter.replace('created_at', 'l.created_at')}) lot_leads,
+              (select count(*) from personal_leads pl where pl.chat_id = s.chat_id{lead_filter.replace('created_at', 'pl.created_at')}) personal_leads,
+              (select count(*) from custom_broadcast_leads cl where cl.chat_id = s.chat_id{lead_filter.replace('created_at', 'cl.created_at')}) custom_leads,
+              (select count(*) from catalog_events cel where cel.chat_id = s.chat_id and cel.event_type='catalog_lead'{catalog_filter.replace('created_at', 'cel.created_at')}) catalog_leads,
+              (select count(*) from chat_messages cm where cm.chat_id = s.chat_id and cm.direction='user'{message_filter.replace('created_at', 'cm.created_at')}) user_messages,
+              (select created_at from bot_events be where be.chat_id = s.chat_id order by created_at desc limit 1) last_bot_event_at,
+              (select event_type from bot_events be where be.chat_id = s.chat_id order by created_at desc limit 1) last_bot_event_type,
+              (select created_at from catalog_events ce where ce.chat_id = s.chat_id order by created_at desc limit 1) last_catalog_event_at,
+              (select event_type from catalog_events ce where ce.chat_id = s.chat_id order by created_at desc limit 1) last_catalog_event_type,
+              (select created_at from chat_messages cm where cm.chat_id = s.chat_id order by created_at desc limit 1) last_message_at
+            from subscribers s
+            order by coalesce(s.last_seen_at, s.subscribed_at) desc
+            """,
+            seen_params + catalog_params + catalog_params + lead_params + lead_params + lead_params + catalog_params + message_params,
+        ).fetchall()
+
+    rows = []
+    for row in rows_raw:
+        item = dict(row)
+        item["lead_count"] = item["lot_leads"] + item["personal_leads"] + item["custom_leads"] + item["catalog_leads"]
+        actions = [
+            (item.get("last_seen_at"), "Активность в боте"),
+            (item.get("last_bot_event_at"), event_label(item.get("last_bot_event_type"))),
+            (item.get("last_catalog_event_at"), event_label(item.get("last_catalog_event_type"))),
+            (item.get("last_message_at"), "Сообщение в чат"),
+        ]
+        actions = [(date, label) for date, label in actions if date]
+        if actions:
+            item["last_action_at"], item["last_action"] = max(actions, key=lambda pair: pair[0])
+        else:
+            item["last_action_at"], item["last_action"] = "", ""
+        rows.append(item)
+    return {"overview": overview, "segments": segments, "rows": rows}
+
+
+def subscriber_statistics_page(query=None):
+    period = parse_stats_period(query or {})
+    data = get_subscriber_statistics_data(period)
+    overview = data["overview"]
+    segments = data["segments"]
+    export_query = period_query(period)
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['subscribed_at'])}</td>
+          <td><strong>{escape(subscriber_identity(row))}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span></td>
+          <td>{escape(subscriber_status_label(row['delivery_status']))}<br><span class="muted">{escape(row['last_delivery_error'] or '')}</span></td>
+          <td>{escape(row['last_seen_at'])}</td>
+          <td>{escape(row['last_delivery_at'])}</td>
+          <td>{escape(row['last_delivery_error_at'])}</td>
+          <td>{row['tg_views']}</td>
+          <td>{row['catalog_opens']} / {row['catalog_views']}</td>
+          <td>{row['lead_count']}</td>
+          <td>{row['user_messages']}</td>
+          <td>{escape(row['filter_rooms'] or '')}<br><span class="muted">{escape(row['filter_district'] or '')}</span></td>
+          <td>{escape(row['last_action'])}<br><span class="muted">{escape(row['last_action_at'])}</span></td>
+        </tr>
+        """
+        for row in data["rows"]
+    )
+    content = f"""
+    <form class="panel" method="get" action="/subscribers/stats">
+      <h2>Период</h2>
+      <div class="form-grid">
+        <label>Период<select name="period">
+          <option value="all" {selected(period['period'], 'all')}>За всё время</option>
+          <option value="today" {selected(period['period'], 'today')}>Сегодня</option>
+          <option value="7d" {selected(period['period'], '7d')}>Последние 7 дней</option>
+          <option value="30d" {selected(period['period'], '30d')}>Последние 30 дней</option>
+          <option value="custom" {selected(period['period'], 'custom')}>Произвольный период</option>
+        </select></label>
+        <label>С даты<input type="date" name="date_from" value="{escape(period['date_from'])}"></label>
+        <label>По дату<input type="date" name="date_to" value="{escape(period['date_to'])}"></label>
+      </div>
+      <p class="actions">
+        <button>Показать</button>
+        <a class="button secondary" href="/subscribers/stats/export.xlsx?{escape(export_query)}">Выгрузить в Excel</a>
+      </p>
+      <p class="muted">Текущий период: {escape(period['label'])}</p>
+    </form>
+    <section class="grid">
+      <div class="metric"><strong>{overview['total']}</strong><span>подписчиков всего</span></div>
+      <div class="metric"><strong>{overview['active']}</strong><span>активные</span></div>
+      <div class="metric"><strong>{overview['blocked']}</strong><span>заблокировали бота</span></div>
+      <div class="metric"><strong>{overview['unreachable'] + overview['deactivated']}</strong><span>недоступные</span></div>
+    </section>
+    <section class="grid">
+      <div class="metric"><strong>{overview['new']}</strong><span>новые за период</span></div>
+      <div class="metric"><strong>{overview['catalog_users']}</strong><span>открывали каталог</span></div>
+      <div class="metric"><strong>{overview['lead_users']}</strong><span>оставляли заявки</span></div>
+      <div class="metric"><strong>{overview['chat_users']}</strong><span>писали в чат</span></div>
+    </section>
+    <section class="grid">
+      <div class="metric"><strong>{round(overview['avg_seen'], 1)}</strong><span>средне просмотров TG-лотов</span></div>
+      <div class="metric"><strong>{segments['active_no_leads']}</strong><span>активные без заявок</span></div>
+      <div class="metric"><strong>{segments['viewed_no_leads']}</strong><span>смотрели без заявки</span></div>
+      <div class="metric"><strong>{segments['catalog_no_leads']}</strong><span>каталог без заявки</span></div>
+    </section>
+    <section class="grid">
+      <div class="metric"><strong>{segments['inactive_30d']}</strong><span>неактивны 30+ дней</span></div>
+      <div class="metric"><strong>{segments['blocked']}</strong><span>blocked-сегмент</span></div>
+    </section>
+    <div class="panel">
+      <h2>Подписчики</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата подписки</th><th>Контакт</th><th>Статус</th><th>Последняя активность</th><th>Доставка OK</th><th>Ошибка доставки</th><th>TG-лоты</th><th>Каталог</th><th>Заявки</th><th>Чат</th><th>Фильтры</th><th>Последнее действие</th></tr></thead><tbody>{rows or '<tr><td colspan="12" class="muted">Подписчиков пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    """
+    return layout("Статистика подписчиков", content, "subscriber_stats")
+
+
+def build_subscriber_statistics_xlsx(period):
+    data = get_subscriber_statistics_data(period)
+    overview = data["overview"]
+    segments = data["segments"]
+    overview_rows = [
+        ["Период", period["label"]],
+        ["Подписчиков всего", overview["total"]],
+        ["Активные", overview["active"]],
+        ["Заблокировали бота", overview["blocked"]],
+        ["Аккаунт удалён", overview["deactivated"]],
+        ["Недоступные", overview["unreachable"]],
+        ["Новые за период", overview["new"]],
+        ["Открывали каталог", overview["catalog_users"]],
+        ["Оставляли заявки", overview["lead_users"]],
+        ["Писали в чат", overview["chat_users"]],
+        ["Среднее количество просмотренных TG-лотов", round(overview["avg_seen"], 1)],
+    ]
+    segment_rows = [
+        ["Сегмент", "Количество"],
+        ["Активные без заявок", segments["active_no_leads"]],
+        ["Смотрели лоты, но не оставили заявку", segments["viewed_no_leads"]],
+        ["Открывали каталог, но не оставили заявку", segments["catalog_no_leads"]],
+        ["Заблокировали бота", segments["blocked"]],
+        ["Давно не взаимодействовали", segments["inactive_30d"]],
+    ]
+    subscriber_rows = [[
+        "Дата подписки", "Имя", "Username", "Telegram ID", "Статус", "Последняя активность",
+        "Последняя успешная доставка", "Дата ошибки доставки", "Ошибка доставки",
+        "TG-лоты", "Открытий каталога", "Просмотров в каталоге", "Заявки", "Сообщения в чат",
+        "Фильтр комнат", "Фильтр района", "Последнее действие", "Дата последнего действия",
+    ]]
+    for row in data["rows"]:
+        subscriber_rows.append([
+            row["subscribed_at"],
+            subscriber_identity(row),
+            f"@{row['username']}" if row["username"] else "",
+            row["chat_id"],
+            subscriber_status_label(row["delivery_status"]),
+            row["last_seen_at"],
+            row["last_delivery_at"],
+            row["last_delivery_error_at"],
+            row["last_delivery_error"],
+            row["tg_views"],
+            row["catalog_opens"],
+            row["catalog_views"],
+            row["lead_count"],
+            row["user_messages"],
+            row["filter_rooms"],
+            row["filter_district"],
+            row["last_action"],
+            row["last_action_at"],
+        ])
+    return build_xlsx_package(
+        [
+            ("Обзор", overview_rows),
+            ("Сегменты", segment_rows),
+            ("Подписчики", subscriber_rows),
+        ]
+    )
+
+
 def project_form(project=None, message=""):
     p = dict(project) if project else {}
     action = "/project/update" if project else "/project/create"
@@ -3276,6 +3628,7 @@ def subscribers_page(message=""):
           </div>
           <p><button>Отправить сегменту</button></p>
         </form>
+        <p class="actions"><a class="button secondary" href="/subscribers/stats">Открыть статистику подписчиков</a></p>
         <div class="panel">
           <h2>Подписчики</h2>
           <div class="table-scroll"><table><thead><tr><th>Chat ID</th><th>Имя</th><th>Подписался</th><th>Последняя активность</th><th>Написать</th></tr></thead><tbody>{rows or empty}</tbody></table></div>
@@ -3669,6 +4022,14 @@ class Handler(BaseHTTPRequestHandler):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 filename,
             )
+        elif path == "/subscribers/stats/export.xlsx":
+            period = parse_stats_period(query)
+            filename = f"subscriber_stats_{now_local().strftime('%Y-%m-%d')}.xlsx"
+            self.send_bytes(
+                build_subscriber_statistics_xlsx(period),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename,
+            )
         elif path == "/project/new":
             self.send_html(project_form())
         elif path == "/project/edit":
@@ -3678,6 +4039,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(leads_page())
         elif path == "/stats":
             self.send_html(statistics_page(query))
+        elif path == "/subscribers/stats":
+            self.send_html(subscriber_statistics_page(query))
         elif path == "/broadcasts":
             self.send_html(broadcasts_page())
         elif path == "/chats":
