@@ -78,6 +78,9 @@ EVENT_LABELS = {
     "click_filter_reset": "Сбросил фильтры",
     "click_filter_view_all": "Фильтр: смотреть без фильтров",
     "click_filter_show_seen": "Фильтр: показать просмотренные",
+    "catalog_open": "Открыл каталог",
+    "catalog_lot_view": "Каталог: просмотр лота",
+    "catalog_lead": "Каталог: оставил заявку",
 }
 
 
@@ -258,6 +261,18 @@ def init_db():
               contact_value text not null,
               message text,
               status text not null default 'new',
+              created_at text not null,
+              foreign key(project_id) references projects(id)
+            );
+
+            create table if not exists catalog_events (
+              id integer primary key autoincrement,
+              event_type text not null,
+              project_id integer,
+              chat_id integer,
+              username text,
+              name text,
+              payload text,
               created_at text not null,
               foreign key(project_id) references projects(id)
             );
@@ -1970,7 +1985,40 @@ def build_active_projects_xlsx():
     return build_xlsx_package([("Актуальные лоты", rows)])
 
 
-def app_layout(title, content, message=""):
+def app_layout(title, content, message="", catalog_event="", project_id=None):
+    event_script = ""
+    if catalog_event:
+        event_key = f"{catalog_event}:{project_id or ''}"
+        once_guard = "sessionStorage.getItem(eventKey)" if catalog_event == "catalog_open" else "false"
+        once_mark = "sessionStorage.setItem(eventKey, '1');" if catalog_event == "catalog_open" else ""
+        event_script = f"""
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+  (function() {{
+    var eventKey = {json.dumps(event_key, ensure_ascii=False)};
+    if ({once_guard}) return;
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (tg && tg.ready) tg.ready();
+    var user = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
+    if (user) {{
+      document.querySelectorAll('input[name="tg_user_json"]').forEach(function(input) {{
+        input.value = JSON.stringify(user);
+      }});
+    }}
+    var payload = {{
+      event_type: {json.dumps(catalog_event, ensure_ascii=False)},
+      project_id: {json.dumps(project_id)},
+      tg_user: user || null,
+      path: window.location.pathname + window.location.search
+    }};
+    fetch('/app/event', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(payload),
+      keepalive: true
+    }}).then(function() {{ {once_mark} }}).catch(function() {{}});
+  }})();
+  </script>"""
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -1984,6 +2032,7 @@ def app_layout(title, content, message=""):
     {f'<div class="notice">{escape(message)}</div>' if message else ''}
     {content}
   </main>
+  {event_script}
 </body>
 </html>"""
 
@@ -2083,7 +2132,7 @@ def app_projects_page(query=None, message=""):
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else '<div class="empty-state">По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор.</div>'}
     """
-    return app_layout("Below Market Dubai", content, message)
+    return app_layout("Below Market Dubai", content, message, catalog_event="catalog_open")
 
 
 def app_project_card(project):
@@ -2176,6 +2225,7 @@ def app_project_page(project_id, message=""):
         {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
         <form class="lead-form" method="post" action="/app/lead">
           <input type="hidden" name="project_id" value="{project['id']}">
+          <input type="hidden" name="tg_user_json" value="">
           <input name="name" placeholder="Ваше имя">
           <input name="contact" required placeholder="Телефон, WhatsApp или Telegram">
           <textarea name="message" placeholder="Комментарий"></textarea>
@@ -2184,10 +2234,62 @@ def app_project_page(project_id, message=""):
       </aside>
     </section>
     """
-    return app_layout(project["title"], content, message)
+    return app_layout(project["title"], content, message, catalog_event="catalog_lot_view", project_id=project["id"])
 
 
-def create_web_lead(project_id, name, contact, message):
+def catalog_user_name(tg_user):
+    if not isinstance(tg_user, dict):
+        return ""
+    parts = [tg_user.get("first_name"), tg_user.get("last_name")]
+    name = " ".join(str(part).strip() for part in parts if part).strip()
+    return name or tg_user.get("username") or ""
+
+
+def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None):
+    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead"}:
+        return None
+    project = get_project(project_id) if project_id else None
+    chat_id = None
+    username = None
+    name = ""
+    if isinstance(tg_user, dict):
+        try:
+            chat_id = int(tg_user.get("id")) if tg_user.get("id") else None
+        except (TypeError, ValueError):
+            chat_id = None
+        username = tg_user.get("username")
+        name = catalog_user_name(tg_user)
+    with db() as conn:
+        cur = conn.execute(
+            """
+            insert into catalog_events(event_type, project_id, chat_id, username, name, payload, created_at)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_type,
+                project["id"] if project else None,
+                chat_id,
+                username,
+                name,
+                json.dumps(payload or {}, ensure_ascii=False),
+                iso_now(),
+            ),
+        )
+        event_id = cur.lastrowid
+    if event_type == "catalog_open":
+        notify_admin(
+            "\n".join(
+                [
+                    "Пользователь открыл каталог",
+                    f"Клиент: {name or 'не определён'}",
+                    f"Telegram: @{username}" if username else f"Telegram ID: {chat_id}" if chat_id else "Источник: мини-апп / браузер",
+                ]
+            )
+        )
+    return event_id
+
+
+def create_web_lead(project_id, name, contact, message, tg_user=None):
     project = get_project(project_id) if project_id else None
     with db() as conn:
         cur = conn.execute(
@@ -2198,6 +2300,12 @@ def create_web_lead(project_id, name, contact, message):
             (project_id if project else None, name, contact, message, iso_now()),
         )
         lead_id = cur.lastrowid
+    record_catalog_event(
+        "catalog_lead",
+        project_id=project_id,
+        tg_user=tg_user,
+        payload={"lead_id": lead_id, "name": name, "contact": contact, "message": message},
+    )
     notify_admin(
         "\n".join(
             [
@@ -2514,11 +2622,14 @@ def get_statistics_data(period):
     end_at = period["end_at"]
     seen_filter, seen_params = period_condition("seen_at", start_at, end_at)
     event_filter, event_params = period_condition("created_at", start_at, end_at)
+    catalog_filter, catalog_params = period_condition("created_at", start_at, end_at)
     lead_filter, lead_params = period_condition("created_at", start_at, end_at)
     subscriber_filter, subscriber_params = period_condition("subscribed_at", start_at, end_at)
     seen_join, seen_join_params = period_condition("s.seen_at", start_at, end_at)
     event_join, event_join_params = period_condition("e.created_at", start_at, end_at)
+    catalog_join, catalog_join_params = period_condition("ce.created_at", start_at, end_at)
     lead_join, lead_join_params = period_condition("l.created_at", start_at, end_at)
+    web_lead_join, web_lead_join_params = period_condition("wl.created_at", start_at, end_at)
 
     with db() as conn:
         overview = {
@@ -2526,7 +2637,10 @@ def get_statistics_data(period):
             "new_subscribers": conn.execute(f"select count(*) c from subscribers where 1=1{subscriber_filter}", subscriber_params).fetchone()["c"],
             "shows": conn.execute(f"select count(*) c from seen_projects where 1=1{seen_filter}", seen_params).fetchone()["c"],
             "clicks": conn.execute(f"select count(*) c from bot_events where event_type like 'click_%'{event_filter}", event_params).fetchone()["c"],
+            "catalog_opens": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_open'{catalog_filter}", catalog_params).fetchone()["c"],
+            "catalog_lot_views": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_lot_view'{catalog_filter}", catalog_params).fetchone()["c"],
             "lot_leads": conn.execute(f"select count(*) c from leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
+            "web_leads": conn.execute(f"select count(*) c from web_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
             "personal_leads": conn.execute(f"select count(*) c from personal_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
             "custom_leads": conn.execute(f"select count(*) c from custom_broadcast_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
         }
@@ -2541,15 +2655,37 @@ def get_statistics_data(period):
               count(distinct s.chat_id) shows,
               count(distinct case when e.event_type like 'click_%' then e.id end) clicks,
               count(distinct case when e.event_type = 'click_interest' then e.id end) interests,
-              count(distinct l.id) leads
+              count(distinct l.id) leads,
+              count(distinct case when ce.event_type = 'catalog_lot_view' then ce.id end) catalog_views,
+              count(distinct wl.id) web_leads
             from projects p
             left join seen_projects s on s.project_id = p.id{seen_join}
             left join bot_events e on e.project_id = p.id{event_join}
             left join leads l on l.project_id = p.id{lead_join}
+            left join catalog_events ce on ce.project_id = p.id{catalog_join}
+            left join web_leads wl on wl.project_id = p.id{web_lead_join}
             group by p.id
-            order by p.status = 'active' desc, shows desc, leads desc, p.created_at desc
+            order by p.status = 'active' desc, catalog_views desc, shows desc, web_leads desc, leads desc, p.created_at desc
             """,
-            seen_join_params + event_join_params + lead_join_params,
+            seen_join_params + event_join_params + lead_join_params + catalog_join_params + web_lead_join_params,
+        ).fetchall()
+        catalog_rows_data = conn.execute(
+            f"""
+            select
+              ce.created_at,
+              ce.event_type,
+              p.title,
+              p.district,
+              coalesce(nullif(ce.name, ''), ce.username, ce.chat_id, 'Не определён') client_name,
+              ce.username,
+              ce.chat_id
+            from catalog_events ce
+            left join projects p on p.id = ce.project_id
+            where 1=1{catalog_filter}
+            order by ce.created_at desc
+            limit 120
+            """,
+            catalog_params,
         ).fetchall()
         seen_rows_data = conn.execute(
             f"""
@@ -2588,6 +2724,7 @@ def get_statistics_data(period):
     return {
         "overview": overview,
         "project_rows": project_rows_data,
+        "catalog_rows": catalog_rows_data,
         "seen_rows": seen_rows_data,
         "event_rows": event_rows_data,
     }
@@ -2597,7 +2734,7 @@ def statistics_page(query=None):
     period = parse_stats_period(query or {})
     data = get_statistics_data(period)
     overview = data["overview"]
-    total_leads = overview["lot_leads"] + overview["personal_leads"] + overview["custom_leads"]
+    total_leads = overview["lot_leads"] + overview["web_leads"] + overview["personal_leads"] + overview["custom_leads"]
     project_rows = "".join(
         f"""
         <tr>
@@ -2607,10 +2744,23 @@ def statistics_page(query=None):
           <td>{row['clicks']}</td>
           <td>{row['interests']}</td>
           <td>{row['leads']}</td>
-          <td>{conversion(row['leads'], row['shows'])}</td>
+          <td>{row['catalog_views']}</td>
+          <td>{row['web_leads']}</td>
+          <td>{conversion(row['web_leads'], row['catalog_views'])}</td>
         </tr>
         """
         for row in data["project_rows"]
+    )
+    catalog_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['created_at'])}</td>
+          <td>{escape(event_label(row['event_type']))}</td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
+          <td>{escape(row['title'] or 'Без лота')}<br><span class="muted">{escape(row['district'])}</span></td>
+        </tr>
+        """
+        for row in data["catalog_rows"]
     )
     seen_rows = "".join(
         f"""
@@ -2656,6 +2806,12 @@ def statistics_page(query=None):
       <div class="metric"><strong>{overview['clicks']}</strong><span>кликов по кнопкам</span></div>
     </section>
     <section class="grid">
+      <div class="metric"><strong>{overview['catalog_opens']}</strong><span>открытий каталога</span></div>
+      <div class="metric"><strong>{overview['catalog_lot_views']}</strong><span>просмотров лотов в каталоге</span></div>
+      <div class="metric"><strong>{overview['web_leads']}</strong><span>заявок из каталога</span></div>
+      <div class="metric"><strong>{conversion(overview['web_leads'], overview['catalog_lot_views'])}</strong><span>конверсия каталога</span></div>
+    </section>
+    <section class="grid">
       <div class="metric"><strong>{total_leads}</strong><span>заявок всего</span></div>
       <div class="metric"><strong>{overview['lot_leads']}</strong><span>заявок по лотам</span></div>
       <div class="metric"><strong>{overview['personal_leads']}</strong><span>персональный подбор</span></div>
@@ -2666,7 +2822,11 @@ def statistics_page(query=None):
     </section>
     <div class="panel">
       <h2>Статистика по лотам</h2>
-      <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>Показы</th><th>Клики</th><th>Интерес</th><th>Заявки</th><th>Конверсия</th></tr></thead><tbody>{project_rows or '<tr><td colspan="7" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>TG-показы</th><th>TG-клики</th><th>TG-интерес</th><th>TG-заявки</th><th>Каталог просмотры</th><th>Каталог заявки</th><th>Конверсия каталога</th></tr></thead><tbody>{project_rows or '<tr><td colspan="9" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>События каталога</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Событие</th><th>Пользователь</th><th>Лот</th></tr></thead><tbody>{catalog_rows or '<tr><td colspan="4" class="muted">Событий каталога пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Кто видел лоты</h2>
@@ -2683,20 +2843,24 @@ def statistics_page(query=None):
 def build_statistics_xlsx(period):
     data = get_statistics_data(period)
     overview = data["overview"]
-    total_leads = overview["lot_leads"] + overview["personal_leads"] + overview["custom_leads"]
+    total_leads = overview["lot_leads"] + overview["web_leads"] + overview["personal_leads"] + overview["custom_leads"]
     overview_rows = [
         ["Период", period["label"]],
         ["Подписчиков всего", overview["subscribers"]],
         ["Новых подписчиков за период", overview["new_subscribers"]],
         ["Показов лотов", overview["shows"]],
         ["Кликов по кнопкам", overview["clicks"]],
+        ["Открытий каталога", overview["catalog_opens"]],
+        ["Просмотров лотов в каталоге", overview["catalog_lot_views"]],
+        ["Заявок из каталога", overview["web_leads"]],
+        ["Конверсия каталога", conversion(overview["web_leads"], overview["catalog_lot_views"])],
         ["Заявок всего", total_leads],
         ["Заявок по лотам", overview["lot_leads"]],
         ["Заявок на персональный подбор", overview["personal_leads"]],
         ["Заявок по свободным рассылкам", overview["custom_leads"]],
         ["Конверсия показов в заявки", conversion(overview["lot_leads"], overview["shows"])],
     ]
-    project_rows = [["Лот", "Район", "Здание", "Статус", "Показы", "Клики", "Интерес", "Заявки", "Конверсия"]]
+    project_rows = [["Лот", "Район", "Здание", "Статус", "TG-показы", "TG-клики", "TG-интерес", "TG-заявки", "Каталог просмотры", "Каталог заявки", "Конверсия каталога"]]
     for row in data["project_rows"]:
         project_rows.append(
             [
@@ -2708,7 +2872,22 @@ def build_statistics_xlsx(period):
                 row["clicks"],
                 row["interests"],
                 row["leads"],
-                conversion(row["leads"], row["shows"]),
+                row["catalog_views"],
+                row["web_leads"],
+                conversion(row["web_leads"], row["catalog_views"]),
+            ]
+        )
+    catalog_rows = [["Дата", "Событие", "Пользователь", "Username", "Telegram ID", "Лот", "Район"]]
+    for row in data["catalog_rows"]:
+        catalog_rows.append(
+            [
+                row["created_at"],
+                event_label(row["event_type"]),
+                row["client_name"],
+                f"@{row['username']}" if row["username"] else "",
+                row["chat_id"] or "",
+                row["title"] or "Без лота",
+                row["district"] or "",
             ]
         )
     seen_rows = [["Дата показа", "Пользователь", "Username", "Chat ID", "Лот", "Район", "Клики", "Заявки"]]
@@ -2732,6 +2911,7 @@ def build_statistics_xlsx(period):
         [
             ("Обзор", overview_rows),
             ("Лоты", project_rows),
+            ("Каталог", catalog_rows),
             ("Кто видел", seen_rows),
             ("Клики", event_rows),
         ]
@@ -3496,11 +3676,39 @@ class Handler(BaseHTTPRequestHandler):
             name = form_value(form, "name").strip()
             contact = form_value(form, "contact").strip()
             message = form_value(form, "message").strip()
+            tg_user = None
+            tg_user_raw = form_value(form, "tg_user_json").strip()
+            if tg_user_raw:
+                try:
+                    tg_user = json.loads(tg_user_raw)
+                except json.JSONDecodeError:
+                    tg_user = None
             if not contact:
                 self.send_html(app_project_page(project_id, "Укажите телефон, WhatsApp или Telegram."), status=400)
                 return
-            create_web_lead(project_id, name, contact, message)
+            create_web_lead(project_id, name, contact, message, tg_user=tg_user)
             self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами."))
+            return
+
+        if path == "/app/event":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode() if length else "{}"
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            try:
+                project_id = int(payload.get("project_id") or 0) or None
+            except (TypeError, ValueError):
+                project_id = None
+            record_catalog_event(
+                payload.get("event_type"),
+                project_id=project_id,
+                tg_user=payload.get("tg_user"),
+                payload=payload,
+            )
+            self.send_response(204)
+            self.end_headers()
             return
 
         if not self.require_auth():
