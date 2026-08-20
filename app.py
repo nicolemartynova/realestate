@@ -46,6 +46,7 @@ PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
+DAILY_SEND_SLOTS = [("morning", dt_time(11, 0)), ("evening", dt_time(17, 0))]
 LEAD_STATUSES = [
     ("new", "Новая"),
     ("contacted", "Связались"),
@@ -175,6 +176,7 @@ def init_db():
               subscribed_at text not null,
               last_seen_at text,
               last_daily_sent_at text,
+              daily_sent_slots text,
               chat_read_at text
             );
 
@@ -309,6 +311,7 @@ def init_db():
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
         ensure_column(conn, "subscribers", "chat_read_at", "text")
+        ensure_column(conn, "subscribers", "daily_sent_slots", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
@@ -880,7 +883,11 @@ def first_active_project():
         ).fetchone()
 
 
-def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False):
+def project_order_clause(random_order=False):
+    return "random()" if random_order else "p.created_at asc, p.id asc"
+
+
+def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False, random_order=False):
     with db() as conn:
         sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
         has_filters = bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
@@ -900,7 +907,7 @@ def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False):
             select p.* from projects p
             left join seen_projects s on s.project_id = p.id and s.chat_id = ?
             where p.status = 'active' and s.project_id is null {extra}
-            order by p.created_at asc, p.id asc
+            order by {project_order_clause(random_order)}
             limit 1
             """,
             params,
@@ -923,7 +930,7 @@ def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False):
             f"""
             select p.* from projects p
             where p.status = 'active' {extra}
-            order by p.created_at asc, p.id asc
+            order by {project_order_clause(random_order)}
             limit 1
             """,
             params,
@@ -943,7 +950,7 @@ def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False):
             f"""
             select p.* from projects p
             where p.status = 'active' {extra}
-            order by p.created_at asc, p.id asc
+            order by {project_order_clause(random_order)}
             limit 1
             """,
             params,
@@ -1069,6 +1076,30 @@ def project_actions_keyboard(project_id, filters_active=False):
     return inline_keyboard(
         rows
     )
+
+
+def welcome_keyboard():
+    rows = []
+    if PUBLIC_BASE_URL:
+        rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app"}}])
+    rows.append([{"text": "🎯 Искать по фильтрам", "callback_data": "filter_start"}])
+    return inline_keyboard(rows)
+
+
+def send_welcome_message(chat_id):
+    text = (
+        "Добро пожаловать в Below Market Dubai 🏙\n\n"
+        "Здесь мы собираем лоты недвижимости в Дубае, которые продаются ниже рынка: "
+        "distress deals, срочные продажи, объекты, которых нет в листингах на площадках.\n\n"
+        "Что вы получите:\n"
+        "🔥 доступ к актуальным предложениям ниже рынка\n"
+        "📊 понятную карточку каждого лота: район, здание, цена, площадь, статус и выгода\n"
+        "🏡 удобный каталог, где можно самостоятельно смотреть объекты\n"
+        "🎯 фильтры по району и количеству комнат, чтобы быстро найти подходящие варианты\n"
+        "📩 новые лоты 2 раза в день в рабочее время, без ночных уведомлений\n\n"
+        "Вы можете начать с каталога или сразу подобрать лоты по фильтрам."
+    )
+    send_message(chat_id, text, keyboard=welcome_keyboard())
 
 
 def send_no_projects_message(chat_id):
@@ -1356,7 +1387,7 @@ def create_personal_lead(chat_id, user, method=None, value=None):
 
 def handle_start(chat_id, user):
     upsert_subscriber(user, chat_id)
-    send_project(chat_id, first_active_project(), user=user)
+    send_welcome_message(chat_id)
 
 
 def handle_text(message):
@@ -1759,6 +1790,31 @@ def in_send_window(moment):
     return SEND_WINDOW_START <= t <= SEND_WINDOW_END
 
 
+def sent_daily_slots(value, today):
+    if not value:
+        return set()
+    date_part, _, slots_part = value.partition(":")
+    if date_part != today:
+        return set()
+    return {slot for slot in slots_part.split(",") if slot}
+
+
+def encode_daily_slots(today, slots):
+    return f"{today}:{','.join(sorted(slots))}"
+
+
+def due_daily_slot(moment, sent_slots):
+    current = moment.time()
+    slots = [
+        slot_key
+        for slot_key, slot_time in DAILY_SEND_SLOTS
+        if current >= slot_time and slot_key not in sent_slots
+    ]
+    if not slots:
+        return None, set()
+    return slots[-1], set(slots[:-1])
+
+
 def scheduler_loop(stop_event):
     while not stop_event.is_set():
         try:
@@ -1795,14 +1851,18 @@ def scheduler_loop(stop_event):
                     subscribers = conn.execute("select * from subscribers").fetchall()
                 today = moment.date().isoformat()
                 for sub in subscribers:
-                    if sub["last_daily_sent_at"] and sub["last_daily_sent_at"].startswith(today):
+                    sent_slots = sent_daily_slots(sub["daily_sent_slots"], today)
+                    slot_key, skipped_slots = due_daily_slot(moment, sent_slots)
+                    if not slot_key:
                         continue
-                    project = next_project_for(sub["chat_id"])
+                    project = next_project_for(sub["chat_id"], random_order=True)
                     if project and send_project(sub["chat_id"], project):
+                        sent_slots.add(slot_key)
+                        sent_slots.update(skipped_slots)
                         with db() as conn:
                             conn.execute(
-                                "update subscribers set last_daily_sent_at = ? where chat_id = ?",
-                                (iso_now(), sub["chat_id"]),
+                                "update subscribers set last_daily_sent_at = ?, daily_sent_slots = ? where chat_id = ?",
+                                (iso_now(), encode_daily_slots(today, sent_slots), sub["chat_id"]),
                             )
                         time.sleep(0.05)
         except Exception:
