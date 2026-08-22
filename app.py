@@ -47,6 +47,8 @@ PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
 DAILY_SEND_SLOTS = [("morning", dt_time(11, 0)), ("evening", dt_time(17, 0))]
+CATALOG_FOLLOWUP_DELAY_MINUTES = 2
+CATALOG_STALE_SESSION_MINUTES = 5
 LEAD_STATUSES = [
     ("new", "Новая"),
     ("contacted", "Связались"),
@@ -64,6 +66,12 @@ SUBSCRIBER_STATUSES = [
     ("unreachable", "Недоступен"),
 ]
 SUBSCRIBER_STATUS_LABELS = dict(SUBSCRIBER_STATUSES)
+SUBSCRIBER_TAGS = [
+    ("", "Без тега"),
+    ("realtor", "Риелтор"),
+    ("end_user", "Конечник"),
+]
+SUBSCRIBER_TAG_LABELS = dict(SUBSCRIBER_TAGS)
 EVENT_LABELS = {
     "click_start_view": "Начал смотреть лоты",
     "click_next": "Смотреть ещё",
@@ -89,6 +97,10 @@ EVENT_LABELS = {
     "catalog_open": "Открыл каталог",
     "catalog_lot_view": "Каталог: просмотр лота",
     "catalog_lead": "Каталог: оставил заявку",
+    "catalog_heartbeat": "Каталог: активная сессия",
+    "catalog_close": "Закрыл каталог",
+    "catalog_followup_yes": "Каталог follow-up: Да",
+    "catalog_followup_no": "Каталог follow-up: Нет",
 }
 
 
@@ -188,6 +200,7 @@ def init_db():
               last_delivery_at text,
               last_delivery_error_at text,
               last_delivery_error text,
+              subscriber_tag text,
               chat_read_at text
             );
 
@@ -290,6 +303,21 @@ def init_db():
               foreign key(project_id) references projects(id)
             );
 
+            create table if not exists catalog_sessions (
+              session_id text primary key,
+              chat_id integer,
+              username text,
+              name text,
+              opened_at text not null,
+              last_seen_at text not null,
+              closed_at text,
+              duration_seconds integer,
+              had_lead integer not null default 0,
+              followup_sent_at text,
+              followup_answer text,
+              followup_answered_at text
+            );
+
             create table if not exists bot_events (
               id integer primary key autoincrement,
               chat_id integer not null,
@@ -327,6 +355,7 @@ def init_db():
         ensure_column(conn, "subscribers", "last_delivery_at", "text")
         ensure_column(conn, "subscribers", "last_delivery_error_at", "text")
         ensure_column(conn, "subscribers", "last_delivery_error", "text")
+        ensure_column(conn, "subscribers", "subscriber_tag", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
@@ -1188,6 +1217,44 @@ def send_no_projects_message(chat_id):
     send_message(chat_id, text, keyboard=keyboard)
 
 
+def send_catalog_followup(chat_id, name):
+    first_name = (name or "").strip()
+    greeting = f"Здравствуйте, {html.escape(first_name)}!" if first_name else "Здравствуйте!"
+    text = (
+        f"{greeting}\n"
+        "Спасибо за интерес к моему боту.\n"
+        "Буду рад проконсультировать вас по вопросам приобретения недвижимости в Дубае.\n"
+        "Подскажите, актуальна сейчас покупка?"
+    )
+    keyboard = inline_keyboard(
+        [
+            [
+                {"text": "✅ Да", "callback_data": "catalog_followup_yes"},
+                {"text": "❌ Нет", "callback_data": "catalog_followup_no"},
+            ]
+        ]
+    )
+    return send_message(chat_id, text, keyboard=keyboard)
+
+
+def send_catalog_positive_reply(chat_id, user):
+    text = (
+        "Спасибо за ответ.\n"
+        "В скором времени я свяжусь с вами по поводу консультации в личных сообщениях.\n\n"
+        "@roi_counter"
+    )
+    keyboard = inline_keyboard(
+        [[{"text": "💬 Открыть диалог с @roi_counter", "url": "https://t.me/roi_counter"}]]
+    )
+    create_personal_lead(
+        chat_id,
+        user,
+        method="catalog_followup",
+        value=f"@{user.get('username')}" if user.get("username") else str(chat_id),
+    )
+    return send_message(chat_id, text, keyboard=keyboard)
+
+
 def send_filter_rooms_prompt(chat_id):
     rooms = active_rooms_options()
     if not rooms:
@@ -1276,9 +1343,25 @@ def send_admin_message(chat_id, text):
 
 def segment_subscribers(segment):
     with db() as conn:
+        if segment == "realtors":
+            return conn.execute(
+                """
+                select * from subscribers
+                where subscriber_tag='realtor' and coalesce(delivery_status, 'active') = 'active'
+                order by last_seen_at desc
+                """
+            ).fetchall()
+        if segment == "end_users":
+            return conn.execute(
+                """
+                select * from subscribers
+                where subscriber_tag='end_user' and coalesce(delivery_status, 'active') = 'active'
+                order by last_seen_at desc
+                """
+            ).fetchall()
         if segment == "active_7d":
             return conn.execute(
-                "select * from subscribers where last_seen_at >= ? order by last_seen_at desc",
+                "select * from subscribers where last_seen_at >= ? and coalesce(delivery_status, 'active') = 'active' order by last_seen_at desc",
                 ((now_local() - timedelta(days=7)).replace(microsecond=0).isoformat(),),
             ).fetchall()
         if segment == "has_lot_leads":
@@ -1647,6 +1730,34 @@ def handle_callback_inner(callback):
         send_message(chat_id, "Напишите номер WhatsApp одним сообщением.")
         return
 
+    if data == "catalog_followup_yes":
+        log_event(chat_id, user, "catalog_followup_yes", payload=data)
+        with db() as conn:
+            conn.execute(
+                """
+                update catalog_sessions
+                set followup_answer='yes', followup_answered_at=?
+                where chat_id=? and followup_sent_at is not null and followup_answer is null
+                """,
+                (iso_now(), chat_id),
+            )
+        send_catalog_positive_reply(chat_id, user)
+        return
+
+    if data == "catalog_followup_no":
+        log_event(chat_id, user, "catalog_followup_no", payload=data)
+        with db() as conn:
+            conn.execute(
+                """
+                update catalog_sessions
+                set followup_answer='no', followup_answered_at=?
+                where chat_id=? and followup_sent_at is not null and followup_answer is null
+                """,
+                (iso_now(), chat_id),
+            )
+        send_message(chat_id, "Спасибо за ответ. Если покупка станет актуальна, каталог всегда будет доступен здесь.")
+        return
+
     action, _, raw_project_id = data.partition(":")
     if action == "lang" and raw_project_id in ("ru", "en"):
         log_event(chat_id, user, "click_language", payload=data)
@@ -1868,6 +1979,59 @@ def get_custom_broadcast_media(broadcast_id):
     ]
 
 
+def process_catalog_followups(moment):
+    stale_cutoff = (moment - timedelta(minutes=CATALOG_STALE_SESSION_MINUTES)).replace(microsecond=0).isoformat()
+    with db() as conn:
+        stale_sessions = conn.execute(
+            """
+            select session_id, opened_at, last_seen_at
+            from catalog_sessions
+            where closed_at is null and last_seen_at <= ?
+            limit 100
+            """,
+            (stale_cutoff,),
+        ).fetchall()
+        for session in stale_sessions:
+            opened_at = parse_iso(session["opened_at"]) or moment
+            last_seen_at = parse_iso(session["last_seen_at"]) or moment
+            duration = max(0, int((last_seen_at - opened_at).total_seconds()))
+            conn.execute(
+                """
+                update catalog_sessions
+                set closed_at=?, duration_seconds=?
+                where session_id=?
+                """,
+                (session["last_seen_at"], duration, session["session_id"]),
+            )
+    cutoff = (moment - timedelta(minutes=CATALOG_FOLLOWUP_DELAY_MINUTES)).replace(microsecond=0).isoformat()
+    with db() as conn:
+        sessions = conn.execute(
+            """
+            select cs.*, s.delivery_status
+            from catalog_sessions cs
+            left join subscribers s on s.chat_id = cs.chat_id
+            where cs.chat_id is not null
+              and cs.closed_at is not null
+              and cs.closed_at <= ?
+              and cs.had_lead = 0
+              and cs.followup_sent_at is null
+              and coalesce(s.delivery_status, 'active') = 'active'
+            order by cs.closed_at asc
+            limit 20
+            """,
+            (cutoff,),
+        ).fetchall()
+    for session in sessions:
+        result = send_catalog_followup(session["chat_id"], session["name"])
+        if result and result.get("ok"):
+            with db() as conn:
+                conn.execute(
+                    "update catalog_sessions set followup_sent_at=? where session_id=?",
+                    (iso_now(), session["session_id"]),
+                )
+        time.sleep(0.05)
+
+
 def in_send_window(moment):
     t = moment.time()
     return SEND_WINDOW_START <= t <= SEND_WINDOW_END
@@ -1902,6 +2066,7 @@ def scheduler_loop(stop_event):
     while not stop_event.is_set():
         try:
             moment = now_local()
+            process_catalog_followups(moment)
             if in_send_window(moment):
                 with db() as conn:
                     pending = conn.execute(
@@ -2139,27 +2304,87 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
   <script>
   (function() {{
     var eventKey = {json.dumps(event_key, ensure_ascii=False)};
-    if ({once_guard}) return;
     var tg = window.Telegram && window.Telegram.WebApp;
     if (tg && tg.ready) tg.ready();
     var user = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
+    var sessionId = sessionStorage.getItem('catalog_session_id');
+    if (!sessionId) {{
+      sessionId = String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+      sessionStorage.setItem('catalog_session_id', sessionId);
+    }}
     if (user) {{
       document.querySelectorAll('input[name="tg_user_json"]').forEach(function(input) {{
         input.value = JSON.stringify(user);
       }});
     }}
-    var payload = {{
-      event_type: {json.dumps(catalog_event, ensure_ascii=False)},
-      project_id: {json.dumps(project_id)},
-      tg_user: user || null,
-      path: window.location.pathname + window.location.search
-    }};
-    fetch('/app/event', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify(payload),
-      keepalive: true
-    }}).then(function() {{ {once_mark} }}).catch(function() {{}});
+    document.querySelectorAll('input[name="catalog_session_id"]').forEach(function(input) {{
+      input.value = sessionId;
+    }});
+    function payload(eventType) {{
+      return {{
+        event_type: eventType,
+        project_id: {json.dumps(project_id)},
+        tg_user: user || null,
+        path: window.location.pathname + window.location.search,
+        session_id: sessionId,
+        visible: document.visibilityState || ''
+      }};
+    }}
+    function sendEvent(eventType, beacon) {{
+      var body = JSON.stringify(payload(eventType));
+      if (beacon && navigator.sendBeacon) {{
+        navigator.sendBeacon('/app/event', new Blob([body], {{type: 'application/json'}}));
+        return;
+      }}
+      fetch('/app/event', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: body,
+        keepalive: true
+      }}).catch(function() {{}});
+    }}
+    if (!({once_guard})) {{
+      sendEvent({json.dumps(catalog_event, ensure_ascii=False)}, false);
+      {once_mark}
+    }}
+    var heartbeat = setInterval(function() {{
+      sendEvent('catalog_heartbeat', false);
+    }}, 30000);
+    var closed = false;
+    var internalNavigation = false;
+    document.addEventListener('click', function(event) {{
+      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+      if (link) {{
+        try {{
+          var url = new URL(link.getAttribute('href'), window.location.origin);
+          if (url.origin === window.location.origin && url.pathname.indexOf('/app') === 0) {{
+            internalNavigation = true;
+          }}
+        }} catch (e) {{}}
+      }}
+    }});
+    document.addEventListener('submit', function(event) {{
+      var form = event.target;
+      if (form && form.action) {{
+        try {{
+          var url = new URL(form.action, window.location.origin);
+          if (url.origin === window.location.origin && url.pathname.indexOf('/app') === 0) {{
+            internalNavigation = true;
+          }}
+        }} catch (e) {{}}
+      }}
+    }});
+    function closeCatalog() {{
+      if (internalNavigation) return;
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      sendEvent('catalog_close', true);
+    }}
+    window.addEventListener('pagehide', closeCatalog);
+    document.addEventListener('visibilitychange', function() {{
+      if (document.visibilityState === 'hidden') closeCatalog();
+    }});
   }})();
   </script>"""
     return f"""<!doctype html>
@@ -2369,6 +2594,7 @@ def app_project_page(project_id, message=""):
         <form class="lead-form" method="post" action="/app/lead">
           <input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
+          <input type="hidden" name="catalog_session_id" value="">
           <input name="name" placeholder="Ваше имя">
           <input name="contact" required placeholder="Телефон, WhatsApp или Telegram">
           <textarea name="message" placeholder="Комментарий"></textarea>
@@ -2388,8 +2614,72 @@ def catalog_user_name(tg_user):
     return name or tg_user.get("username") or ""
 
 
+def parse_iso(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def catalog_session_id(payload):
+    if not isinstance(payload, dict):
+        return None
+    value = str(payload.get("session_id") or "").strip()
+    return value[:80] or None
+
+
+def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, name="", had_lead=False):
+    if not session_id:
+        return
+    now = iso_now()
+    with db() as conn:
+        existing = conn.execute("select * from catalog_sessions where session_id = ?", (session_id,)).fetchone()
+        if not existing:
+            conn.execute(
+                """
+                insert into catalog_sessions(session_id, chat_id, username, name, opened_at, last_seen_at, had_lead)
+                values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, chat_id, username, name, now, now, 1 if had_lead else 0),
+            )
+            existing = conn.execute("select * from catalog_sessions where session_id = ?", (session_id,)).fetchone()
+        if event_type == "catalog_close":
+            opened_at = parse_iso(existing["opened_at"]) or now_local()
+            closed_at = parse_iso(now) or now_local()
+            duration = max(0, int((closed_at - opened_at).total_seconds()))
+            conn.execute(
+                """
+                update catalog_sessions
+                set chat_id=coalesce(?, chat_id),
+                    username=coalesce(?, username),
+                    name=coalesce(nullif(?, ''), name),
+                    last_seen_at=?,
+                    closed_at=?,
+                    duration_seconds=?,
+                    had_lead=max(had_lead, ?)
+                where session_id=?
+                """,
+                (chat_id, username, name, now, now, duration, 1 if had_lead else 0, session_id),
+            )
+        else:
+            conn.execute(
+                """
+                update catalog_sessions
+                set chat_id=coalesce(?, chat_id),
+                    username=coalesce(?, username),
+                    name=coalesce(nullif(?, ''), name),
+                    last_seen_at=?,
+                    had_lead=max(had_lead, ?)
+                where session_id=?
+                """,
+                (chat_id, username, name, now, 1 if had_lead else 0, session_id),
+            )
+
+
 def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None):
-    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead"}:
+    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close"}:
         return None
     project = get_project(project_id) if project_id else None
     chat_id = None
@@ -2402,6 +2692,8 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
             chat_id = None
         username = tg_user.get("username")
         name = catalog_user_name(tg_user)
+    session_id = catalog_session_id(payload)
+    upsert_catalog_session(session_id, event_type, chat_id, username, name, had_lead=event_type == "catalog_lead")
     with db() as conn:
         cur = conn.execute(
             """
@@ -2432,7 +2724,7 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
     return event_id
 
 
-def create_web_lead(project_id, name, contact, message, tg_user=None):
+def create_web_lead(project_id, name, contact, message, tg_user=None, session_id=None):
     project = get_project(project_id) if project_id else None
     with db() as conn:
         cur = conn.execute(
@@ -2447,7 +2739,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None):
         "catalog_lead",
         project_id=project_id,
         tg_user=tg_user,
-        payload={"lead_id": lead_id, "name": name, "contact": contact, "message": message},
+        payload={"lead_id": lead_id, "name": name, "contact": contact, "message": message, "session_id": session_id},
     )
     notify_admin(
         "\n".join(
@@ -2685,6 +2977,20 @@ def conversion(numerator, denominator):
     return f"{round(numerator / denominator * 100, 1)}%"
 
 
+def format_duration(seconds):
+    try:
+        total = int(seconds or 0)
+    except (TypeError, ValueError):
+        total = 0
+    minutes, secs = divmod(total, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}ч {minutes}м"
+    if minutes:
+        return f"{minutes}м {secs}с"
+    return f"{secs}с"
+
+
 def event_label(event_type):
     return EVENT_LABELS.get(event_type, event_type)
 
@@ -2772,6 +3078,7 @@ def get_statistics_data(period):
     seen_join, seen_join_params = period_condition("s.seen_at", start_at, end_at)
     event_join, event_join_params = period_condition("e.created_at", start_at, end_at)
     catalog_join, catalog_join_params = period_condition("ce.created_at", start_at, end_at)
+    session_filter, session_params = period_condition("opened_at", start_at, end_at)
     lead_join, lead_join_params = period_condition("l.created_at", start_at, end_at)
     web_lead_join, web_lead_join_params = period_condition("wl.created_at", start_at, end_at)
 
@@ -2783,6 +3090,12 @@ def get_statistics_data(period):
             "clicks": conn.execute(f"select count(*) c from bot_events where event_type like 'click_%'{event_filter}", event_params).fetchone()["c"],
             "catalog_opens": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_open'{catalog_filter}", catalog_params).fetchone()["c"],
             "catalog_lot_views": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_lot_view'{catalog_filter}", catalog_params).fetchone()["c"],
+            "catalog_closes": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_close'{catalog_filter}", catalog_params).fetchone()["c"],
+            "catalog_sessions": conn.execute(f"select count(*) c from catalog_sessions where 1=1{session_filter}", session_params).fetchone()["c"],
+            "catalog_avg_duration": conn.execute(f"select avg(duration_seconds) c from catalog_sessions where duration_seconds is not null{session_filter}", session_params).fetchone()["c"] or 0,
+            "catalog_followups": conn.execute(f"select count(*) c from catalog_sessions where followup_sent_at is not null{session_filter}", session_params).fetchone()["c"],
+            "catalog_followup_yes": conn.execute(f"select count(*) c from catalog_sessions where followup_answer='yes'{session_filter}", session_params).fetchone()["c"],
+            "catalog_followup_no": conn.execute(f"select count(*) c from catalog_sessions where followup_answer='no'{session_filter}", session_params).fetchone()["c"],
             "lot_leads": conn.execute(f"select count(*) c from leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
             "web_leads": conn.execute(f"select count(*) c from web_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
             "personal_leads": conn.execute(f"select count(*) c from personal_leads where 1=1{lead_filter}", lead_params).fetchone()["c"],
@@ -2825,11 +3138,32 @@ def get_statistics_data(period):
               ce.chat_id
             from catalog_events ce
             left join projects p on p.id = ce.project_id
-            where 1=1{catalog_filter}
+            where ce.event_type != 'catalog_heartbeat'{catalog_filter}
             order by ce.created_at desc
             limit 120
             """,
             catalog_params,
+        ).fetchall()
+        catalog_session_rows_data = conn.execute(
+            f"""
+            select
+              session_id,
+              opened_at,
+              closed_at,
+              duration_seconds,
+              had_lead,
+              followup_sent_at,
+              followup_answer,
+              followup_answered_at,
+              coalesce(nullif(name, ''), username, chat_id, 'Не определён') client_name,
+              username,
+              chat_id
+            from catalog_sessions
+            where 1=1{session_filter}
+            order by opened_at desc
+            limit 120
+            """,
+            session_params,
         ).fetchall()
         seen_rows_data = conn.execute(
             f"""
@@ -2869,6 +3203,7 @@ def get_statistics_data(period):
         "overview": overview,
         "project_rows": project_rows_data,
         "catalog_rows": catalog_rows_data,
+        "catalog_session_rows": catalog_session_rows_data,
         "seen_rows": seen_rows_data,
         "event_rows": event_rows_data,
     }
@@ -2905,6 +3240,19 @@ def statistics_page(query=None):
         </tr>
         """
         for row in data["catalog_rows"]
+    )
+    catalog_session_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['opened_at'])}<br><span class="muted">Закрыт: {escape(row['closed_at'] or '')}</span></td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
+          <td>{format_duration(row['duration_seconds'])}</td>
+          <td>{'Да' if row['had_lead'] else 'Нет'}</td>
+          <td>{escape(row['followup_sent_at'] or '')}</td>
+          <td>{escape(row['followup_answer'] or '')}<br><span class="muted">{escape(row['followup_answered_at'] or '')}</span></td>
+        </tr>
+        """
+        for row in data["catalog_session_rows"]
     )
     seen_rows = "".join(
         f"""
@@ -2956,6 +3304,12 @@ def statistics_page(query=None):
       <div class="metric"><strong>{conversion(overview['web_leads'], overview['catalog_lot_views'])}</strong><span>конверсия каталога</span></div>
     </section>
     <section class="grid">
+      <div class="metric"><strong>{overview['catalog_closes']}</strong><span>закрытий каталога</span></div>
+      <div class="metric"><strong>{format_duration(overview['catalog_avg_duration'])}</strong><span>среднее время в каталоге</span></div>
+      <div class="metric"><strong>{overview['catalog_followups']}</strong><span>follow-up отправлено</span></div>
+      <div class="metric"><strong>{overview['catalog_followup_yes']} / {overview['catalog_followup_no']}</strong><span>ответы Да / Нет</span></div>
+    </section>
+    <section class="grid">
       <div class="metric"><strong>{total_leads}</strong><span>заявок всего</span></div>
       <div class="metric"><strong>{overview['lot_leads']}</strong><span>заявок по лотам</span></div>
       <div class="metric"><strong>{overview['personal_leads']}</strong><span>персональный подбор</span></div>
@@ -2971,6 +3325,10 @@ def statistics_page(query=None):
     <div class="panel">
       <h2>События каталога</h2>
       <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Событие</th><th>Пользователь</th><th>Лот</th></tr></thead><tbody>{catalog_rows or '<tr><td colspan="4" class="muted">Событий каталога пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>Сессии каталога</h2>
+      <div class="table-scroll"><table><thead><tr><th>Открытие / закрытие</th><th>Пользователь</th><th>Время</th><th>Заявка</th><th>Follow-up</th><th>Ответ</th></tr></thead><tbody>{catalog_session_rows or '<tr><td colspan="6" class="muted">Сессий каталога пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Кто видел лоты</h2>
@@ -2996,6 +3354,12 @@ def build_statistics_xlsx(period):
         ["Кликов по кнопкам", overview["clicks"]],
         ["Открытий каталога", overview["catalog_opens"]],
         ["Просмотров лотов в каталоге", overview["catalog_lot_views"]],
+        ["Закрытий каталога", overview["catalog_closes"]],
+        ["Сессий каталога", overview["catalog_sessions"]],
+        ["Среднее время в каталоге", format_duration(overview["catalog_avg_duration"])],
+        ["Follow-up отправлено", overview["catalog_followups"]],
+        ["Follow-up Да", overview["catalog_followup_yes"]],
+        ["Follow-up Нет", overview["catalog_followup_no"]],
         ["Заявок из каталога", overview["web_leads"]],
         ["Конверсия каталога", conversion(overview["web_leads"], overview["catalog_lot_views"])],
         ["Заявок всего", total_leads],
@@ -3034,6 +3398,22 @@ def build_statistics_xlsx(period):
                 row["district"] or "",
             ]
         )
+    catalog_session_rows = [["Открытие", "Закрытие", "Длительность", "Пользователь", "Username", "Telegram ID", "Была заявка", "Follow-up отправлен", "Ответ", "Дата ответа"]]
+    for row in data["catalog_session_rows"]:
+        catalog_session_rows.append(
+            [
+                row["opened_at"],
+                row["closed_at"],
+                format_duration(row["duration_seconds"]),
+                row["client_name"],
+                f"@{row['username']}" if row["username"] else "",
+                row["chat_id"] or "",
+                "Да" if row["had_lead"] else "Нет",
+                row["followup_sent_at"] or "",
+                row["followup_answer"] or "",
+                row["followup_answered_at"] or "",
+            ]
+        )
     seen_rows = [["Дата показа", "Пользователь", "Username", "Chat ID", "Лот", "Район", "Клики", "Заявки"]]
     for row in data["seen_rows"]:
         seen_rows.append(
@@ -3056,6 +3436,7 @@ def build_statistics_xlsx(period):
             ("Обзор", overview_rows),
             ("Лоты", project_rows),
             ("Каталог", catalog_rows),
+            ("Сессии каталога", catalog_session_rows),
             ("Кто видел", seen_rows),
             ("Клики", event_rows),
         ]
@@ -3064,6 +3445,18 @@ def build_statistics_xlsx(period):
 
 def subscriber_status_label(status):
     return SUBSCRIBER_STATUS_LABELS.get(status or "active", status or "Активен")
+
+
+def subscriber_tag_label(tag):
+    return SUBSCRIBER_TAG_LABELS.get(tag or "", tag or "Без тега")
+
+
+def subscriber_tag_select(current):
+    current = current or ""
+    return "".join(
+        f'<option value="{escape(value)}" {selected(current, value)}>{escape(label)}</option>'
+        for value, label in SUBSCRIBER_TAGS
+    )
 
 
 def subscriber_identity(row):
@@ -3205,6 +3598,7 @@ def subscriber_statistics_page(query=None):
         <tr>
           <td>{escape(row['subscribed_at'])}</td>
           <td><strong>{escape(subscriber_identity(row))}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span></td>
+          <td>{escape(subscriber_tag_label(row['subscriber_tag']))}</td>
           <td>{escape(subscriber_status_label(row['delivery_status']))}<br><span class="muted">{escape(row['last_delivery_error'] or '')}</span></td>
           <td>{escape(row['last_seen_at'])}</td>
           <td>{escape(row['last_delivery_at'])}</td>
@@ -3263,7 +3657,7 @@ def subscriber_statistics_page(query=None):
     </section>
     <div class="panel">
       <h2>Подписчики</h2>
-      <div class="table-scroll"><table><thead><tr><th>Дата подписки</th><th>Контакт</th><th>Статус</th><th>Последняя активность</th><th>Доставка OK</th><th>Ошибка доставки</th><th>TG-лоты</th><th>Каталог</th><th>Заявки</th><th>Чат</th><th>Фильтры</th><th>Последнее действие</th></tr></thead><tbody>{rows or '<tr><td colspan="12" class="muted">Подписчиков пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Дата подписки</th><th>Контакт</th><th>Тег</th><th>Статус</th><th>Последняя активность</th><th>Доставка OK</th><th>Ошибка доставки</th><th>TG-лоты</th><th>Каталог</th><th>Заявки</th><th>Чат</th><th>Фильтры</th><th>Последнее действие</th></tr></thead><tbody>{rows or '<tr><td colspan="13" class="muted">Подписчиков пока нет.</td></tr>'}</tbody></table></div>
     </div>
     """
     return layout("Статистика подписчиков", content, "subscriber_stats")
@@ -3295,7 +3689,7 @@ def build_subscriber_statistics_xlsx(period):
         ["Давно не взаимодействовали", segments["inactive_30d"]],
     ]
     subscriber_rows = [[
-        "Дата подписки", "Имя", "Username", "Telegram ID", "Статус", "Последняя активность",
+        "Дата подписки", "Имя", "Username", "Telegram ID", "Тег", "Статус", "Последняя активность",
         "Последняя успешная доставка", "Дата ошибки доставки", "Ошибка доставки",
         "TG-лоты", "Открытий каталога", "Просмотров в каталоге", "Заявки", "Сообщения в чат",
         "Фильтр комнат", "Фильтр района", "Последнее действие", "Дата последнего действия",
@@ -3306,6 +3700,7 @@ def build_subscriber_statistics_xlsx(period):
             subscriber_identity(row),
             f"@{row['username']}" if row["username"] else "",
             row["chat_id"],
+            subscriber_tag_label(row["subscriber_tag"]),
             subscriber_status_label(row["delivery_status"]),
             row["last_seen_at"],
             row["last_delivery_at"],
@@ -3601,6 +3996,13 @@ def subscribers_page(message=""):
         <tr>
           <td>{escape(s['chat_id'])}</td>
           <td>{escape(s['first_name'])} {escape(s['last_name'])}<br><span class='muted'>@{escape(s['username'])}</span></td>
+          <td>
+            <form method="post" action="/subscriber/tag" class="actions">
+              <input type="hidden" name="chat_id" value="{escape(s['chat_id'])}">
+              <select name="subscriber_tag">{subscriber_tag_select(s['subscriber_tag'])}</select>
+              <button>Сохранить</button>
+            </form>
+          </td>
           <td>{escape(s['subscribed_at'])}</td>
           <td>{escape(s['last_seen_at'])}</td>
           <td>
@@ -3610,7 +4012,7 @@ def subscribers_page(message=""):
         """
         for s in rows_data
     )
-    empty = '<tr><td colspan="5" class="muted">Подписчиков пока нет.</td></tr>'
+    empty = '<tr><td colspan="6" class="muted">Подписчиков пока нет.</td></tr>'
     return layout(
         "Подписчики",
         f"""
@@ -3619,6 +4021,8 @@ def subscribers_page(message=""):
           <div class="form-grid">
             <label>Сегмент<select name="segment">
               <option value="all">Все подписчики</option>
+              <option value="realtors">Риелторы</option>
+              <option value="end_users">Конечники</option>
               <option value="active_7d">Активные за 7 дней</option>
               <option value="clicked_interest">Нажимали интерес</option>
               <option value="has_lot_leads">Оставляли заявку по лоту</option>
@@ -3631,7 +4035,7 @@ def subscribers_page(message=""):
         <p class="actions"><a class="button secondary" href="/subscribers/stats">Открыть статистику подписчиков</a></p>
         <div class="panel">
           <h2>Подписчики</h2>
-          <div class="table-scroll"><table><thead><tr><th>Chat ID</th><th>Имя</th><th>Подписался</th><th>Последняя активность</th><th>Написать</th></tr></thead><tbody>{rows or empty}</tbody></table></div>
+          <div class="table-scroll"><table><thead><tr><th>Chat ID</th><th>Имя</th><th>Тег</th><th>Подписался</th><th>Последняя активность</th><th>Написать</th></tr></thead><tbody>{rows or empty}</tbody></table></div>
         </div>
         """,
         "subscribers",
@@ -4099,6 +4503,7 @@ class Handler(BaseHTTPRequestHandler):
             name = form_value(form, "name").strip()
             contact = form_value(form, "contact").strip()
             message = form_value(form, "message").strip()
+            session_id = form_value(form, "catalog_session_id").strip()[:80]
             tg_user = None
             tg_user_raw = form_value(form, "tg_user_json").strip()
             if tg_user_raw:
@@ -4109,7 +4514,7 @@ class Handler(BaseHTTPRequestHandler):
             if not contact:
                 self.send_html(app_project_page(project_id, "Укажите телефон, WhatsApp или Telegram."), status=400)
                 return
-            create_web_lead(project_id, name, contact, message, tg_user=tg_user)
+            create_web_lead(project_id, name, contact, message, tg_user=tg_user, session_id=session_id)
             self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами."))
             return
 
@@ -4233,6 +4638,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             count, total = send_segment_message(segment, text)
             self.send_html(subscribers_page(f"Отправлено: {count} из {total}"))
+        elif path == "/subscriber/tag":
+            form = parse_form(self)
+            chat_id = form_value(form, "chat_id")
+            tag = form_value(form, "subscriber_tag")
+            if tag in SUBSCRIBER_TAG_LABELS:
+                with db() as conn:
+                    conn.execute("update subscribers set subscriber_tag = ? where chat_id = ?", (tag or None, chat_id))
+            self.redirect("/subscribers")
         elif path == "/broadcast/create":
             form = parse_form(self)
             send_at_raw = form_value(form, "send_at")
