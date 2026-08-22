@@ -103,6 +103,7 @@ EVENT_LABELS = {
     "catalog_close": "Закрыл каталог",
     "catalog_followup_yes": "Каталог follow-up: Да",
     "catalog_followup_no": "Каталог follow-up: Нет",
+    "start_shared_lot": "Открыл лот по deep link",
 }
 
 
@@ -3205,6 +3206,20 @@ def get_statistics_data(period):
             "new_subscribers": conn.execute(f"select count(*) c from subscribers where 1=1{subscriber_filter}", subscriber_params).fetchone()["c"],
             "shows": conn.execute(f"select count(*) c from seen_projects where 1=1{seen_filter}", seen_params).fetchone()["c"],
             "clicks": conn.execute(f"select count(*) c from bot_events where event_type like 'click_%'{event_filter}", event_params).fetchone()["c"],
+            "deep_link_opens": conn.execute(f"select count(*) c from bot_events where event_type = 'start_shared_lot'{event_filter}", event_params).fetchone()["c"],
+            "deep_link_users": conn.execute(f"select count(distinct chat_id) c from bot_events where event_type = 'start_shared_lot'{event_filter}", event_params).fetchone()["c"],
+            "deep_link_leads": conn.execute(
+                f"""
+                select count(distinct l.id) c
+                from leads l
+                join bot_events e on e.chat_id = l.chat_id
+                 and e.project_id = l.project_id
+                 and e.event_type = 'start_shared_lot'
+                 and l.created_at >= e.created_at
+                where 1=1{lead_filter}
+                """,
+                lead_params,
+            ).fetchone()["c"],
             "catalog_opens": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_open'{catalog_filter}", catalog_params).fetchone()["c"],
             "catalog_lot_views": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_lot_view'{catalog_filter}", catalog_params).fetchone()["c"],
             "catalog_closes": conn.execute(f"select count(*) c from catalog_events where event_type = 'catalog_close'{catalog_filter}", catalog_params).fetchone()["c"],
@@ -3229,6 +3244,8 @@ def get_statistics_data(period):
               count(distinct s.chat_id) shows,
               count(distinct case when e.event_type like 'click_%' then e.id end) clicks,
               count(distinct case when e.event_type = 'click_interest' then e.id end) interests,
+              count(distinct case when e.event_type = 'start_shared_lot' then e.id end) deep_link_opens,
+              count(distinct case when e.event_type = 'start_shared_lot' then e.chat_id end) deep_link_users,
               count(distinct l.id) leads,
               count(distinct case when ce.event_type = 'catalog_lot_view' then ce.id end) catalog_views,
               count(distinct wl.id) web_leads
@@ -3297,6 +3314,28 @@ def get_statistics_data(period):
             """,
             session_params,
         ).fetchall()
+        deep_link_rows_data = conn.execute(
+            f"""
+            select
+              e.created_at,
+              p.title,
+              p.district,
+              coalesce(nullif(e.name, ''), e.username, e.chat_id, 'Не определён') client_name,
+              e.username,
+              e.chat_id,
+              count(distinct l.id) leads_after_open
+            from bot_events e
+            left join projects p on p.id = e.project_id
+            left join leads l on l.project_id = e.project_id
+             and l.chat_id = e.chat_id
+             and l.created_at >= e.created_at
+            where e.event_type = 'start_shared_lot'{event_filter}
+            group by e.id
+            order by e.created_at desc
+            limit 120
+            """,
+            event_params,
+        ).fetchall()
         seen_rows_data = conn.execute(
             f"""
             select
@@ -3337,6 +3376,7 @@ def get_statistics_data(period):
         "catalog_rows": catalog_rows_data,
         "catalog_session_rows": catalog_session_rows_data,
         "catalog_followup_ab_rows": catalog_followup_ab_rows_data,
+        "deep_link_rows": deep_link_rows_data,
         "seen_rows": seen_rows_data,
         "event_rows": event_rows_data,
     }
@@ -3356,6 +3396,8 @@ def statistics_page(query=None):
           <td>{row['clicks']}</td>
           <td>{row['interests']}</td>
           <td>{row['leads']}</td>
+          <td>{row['deep_link_opens']}</td>
+          <td>{row['deep_link_users']}</td>
           <td>{row['catalog_views']}</td>
           <td>{row['web_leads']}</td>
           <td>{conversion(row['web_leads'], row['catalog_views'])}</td>
@@ -3398,6 +3440,17 @@ def statistics_page(query=None):
         </tr>
         """
         for row in data["catalog_followup_ab_rows"]
+    )
+    deep_link_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['created_at'])}</td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
+          <td>{escape(row['title'] or 'Лот удалён')}<br><span class="muted">{escape(row['district'] or '')}</span></td>
+          <td>{row['leads_after_open']}</td>
+        </tr>
+        """
+        for row in data["deep_link_rows"]
     )
     seen_rows = "".join(
         f"""
@@ -3463,13 +3516,23 @@ def statistics_page(query=None):
     <section class="grid">
       <div class="metric"><strong>{conversion(overview['lot_leads'], overview['shows'])}</strong><span>конверсия показов в заявки</span></div>
     </section>
+    <section class="grid">
+      <div class="metric"><strong>{overview['deep_link_opens']}</strong><span>deep-link переходов</span></div>
+      <div class="metric"><strong>{overview['deep_link_users']}</strong><span>уникальных пользователей по deep link</span></div>
+      <div class="metric"><strong>{overview['deep_link_leads']}</strong><span>заявок после deep link</span></div>
+      <div class="metric"><strong>{conversion(overview['deep_link_leads'], overview['deep_link_opens'])}</strong><span>конверсия deep link</span></div>
+    </section>
     <div class="panel">
       <h2>A/B тест follow-up</h2>
       <div class="table-scroll"><table><thead><tr><th>Вариант</th><th>Отправлено</th><th>Да</th><th>Нет</th><th>Конверсия в Да</th></tr></thead><tbody>{catalog_followup_ab_rows or '<tr><td colspan="5" class="muted">A/B данных пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
+      <h2>Deep links</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Пользователь</th><th>Лот</th><th>Заявки после перехода</th></tr></thead><tbody>{deep_link_rows or '<tr><td colspan="4" class="muted">Переходов по deep link пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
       <h2>Статистика по лотам</h2>
-      <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>TG-показы</th><th>TG-клики</th><th>TG-интерес</th><th>TG-заявки</th><th>Каталог просмотры</th><th>Каталог заявки</th><th>Конверсия каталога</th></tr></thead><tbody>{project_rows or '<tr><td colspan="9" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>TG-показы</th><th>TG-клики</th><th>TG-интерес</th><th>TG-заявки</th><th>Deep link переходы</th><th>Deep link пользователи</th><th>Каталог просмотры</th><th>Каталог заявки</th><th>Конверсия каталога</th></tr></thead><tbody>{project_rows or '<tr><td colspan="11" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>События каталога</h2>
@@ -3516,6 +3579,10 @@ def build_statistics_xlsx(period):
         ["Заявок на персональный подбор", overview["personal_leads"]],
         ["Заявок по свободным рассылкам", overview["custom_leads"]],
         ["Конверсия показов в заявки", conversion(overview["lot_leads"], overview["shows"])],
+        ["Deep-link переходов", overview["deep_link_opens"]],
+        ["Уникальных пользователей по deep link", overview["deep_link_users"]],
+        ["Заявок после deep link", overview["deep_link_leads"]],
+        ["Конверсия deep link", conversion(overview["deep_link_leads"], overview["deep_link_opens"])],
     ]
     ab_rows = [["Вариант", "Код", "Отправлено", "Да", "Нет", "Конверсия в Да"]]
     for row in data["catalog_followup_ab_rows"]:
@@ -3529,7 +3596,7 @@ def build_statistics_xlsx(period):
                 conversion(row["yes_count"] or 0, row["sent"]),
             ]
         )
-    project_rows = [["Лот", "Район", "Здание", "Статус", "TG-показы", "TG-клики", "TG-интерес", "TG-заявки", "Каталог просмотры", "Каталог заявки", "Конверсия каталога"]]
+    project_rows = [["Лот", "Район", "Здание", "Статус", "TG-показы", "TG-клики", "TG-интерес", "TG-заявки", "Deep link переходы", "Deep link пользователи", "Каталог просмотры", "Каталог заявки", "Конверсия каталога"]]
     for row in data["project_rows"]:
         project_rows.append(
             [
@@ -3541,6 +3608,8 @@ def build_statistics_xlsx(period):
                 row["clicks"],
                 row["interests"],
                 row["leads"],
+                row["deep_link_opens"],
+                row["deep_link_users"],
                 row["catalog_views"],
                 row["web_leads"],
                 conversion(row["web_leads"], row["catalog_views"]),
@@ -3576,6 +3645,19 @@ def build_statistics_xlsx(period):
                 row["followup_answered_at"] or "",
             ]
         )
+    deep_link_rows = [["Дата", "Пользователь", "Username", "Telegram ID", "Лот", "Район", "Заявки после перехода"]]
+    for row in data["deep_link_rows"]:
+        deep_link_rows.append(
+            [
+                row["created_at"],
+                row["client_name"],
+                f"@{row['username']}" if row["username"] else "",
+                row["chat_id"] or "",
+                row["title"] or "Лот удалён",
+                row["district"] or "",
+                row["leads_after_open"],
+            ]
+        )
     seen_rows = [["Дата показа", "Пользователь", "Username", "Chat ID", "Лот", "Район", "Клики", "Заявки"]]
     for row in data["seen_rows"]:
         seen_rows.append(
@@ -3597,6 +3679,7 @@ def build_statistics_xlsx(period):
         [
             ("Обзор", overview_rows),
             ("AB Follow-up", ab_rows),
+            ("Deep links", deep_link_rows),
             ("Лоты", project_rows),
             ("Каталог", catalog_rows),
             ("Сессии каталога", catalog_session_rows),
