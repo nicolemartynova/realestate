@@ -48,6 +48,7 @@ SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
 DAILY_SEND_SLOTS = [("morning", dt_time(11, 0)), ("evening", dt_time(17, 0))]
 CATALOG_FOLLOWUP_DELAY_MINUTES = 2
+CATALOG_CLOSE_FOLLOWUP_DELAY_SECONDS = 5
 CATALOG_STALE_SESSION_MINUTES = 5
 LEAD_STATUSES = [
     ("new", "Новая"),
@@ -359,6 +360,7 @@ def init_db():
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
+        ensure_column(conn, "catalog_sessions", "followup_variant", "text")
 
 
 def ensure_column(conn, table_name, column_name, column_type):
@@ -1219,21 +1221,47 @@ def send_no_projects_message(chat_id):
     send_message(chat_id, text, keyboard=keyboard)
 
 
-def send_catalog_followup(chat_id, name):
+def catalog_followup_variant(chat_id):
+    digest = hashlib.sha256(str(chat_id).encode()).hexdigest()
+    return "a" if int(digest[:8], 16) % 2 == 0 else "b"
+
+
+def followup_variant_label(variant):
+    return {
+        "a": "A — подбор 3-5 лотов",
+        "b": "B — консультация / актуальна покупка",
+    }.get(variant or "", "Не задан")
+
+
+def send_catalog_followup(chat_id, name, variant="a"):
     first_name = (name or "").strip()
     greeting = f"Здравствуйте, {html.escape(first_name)}!" if first_name else "Здравствуйте!"
-    text = (
-        f"{greeting}\n"
-        "Это Александр.\n"
-        "Спасибо за интерес к моему боту.\n"
-        "Вижу, вы посмотрели каталог. Хотите, я подберу 3-5 лотов ниже рынка под ваш бюджет и цель покупки?"
-    )
+    if variant == "b":
+        text = (
+            f"{greeting}\n"
+            "Это Александр.\n"
+            "Спасибо за интерес к моему боту.\n"
+            "Буду рад проконсультировать вас по вопросам приобретения недвижимости в Дубае.\n"
+            "Подскажите, актуальна сейчас покупка?"
+        )
+        buttons = [
+            {"text": "✅ Да, актуальна", "callback_data": "catalog_followup_yes"},
+            {"text": "👀 Пока нет", "callback_data": "catalog_followup_no"},
+        ]
+    else:
+        text = (
+            f"{greeting}\n"
+            "Это Александр.\n"
+            "Спасибо за интерес к моему боту.\n"
+            "Вижу, вы посмотрели каталог. Хотите, я подберу 3-5 лотов ниже рынка под ваш бюджет и цель покупки?"
+        )
+        buttons = [
+            {"text": "✅ Да, подобрать", "callback_data": "catalog_followup_yes"},
+            {"text": "👀 Пока просто смотрю", "callback_data": "catalog_followup_no"},
+        ]
     keyboard = inline_keyboard(
         [
-            [
-                {"text": "✅ Да, подобрать", "callback_data": "catalog_followup_yes"},
-                {"text": "👀 Пока просто смотрю", "callback_data": "catalog_followup_no"},
-            ]
+            buttons
         ]
     )
     return send_message(chat_id, text, keyboard=keyboard)
@@ -2040,14 +2068,59 @@ def process_catalog_followups(moment):
             (cutoff,),
         ).fetchall()
     for session in sessions:
-        result = send_catalog_followup(session["chat_id"], session["name"])
+        variant = catalog_followup_variant(session["chat_id"])
+        result = send_catalog_followup(session["chat_id"], session["name"], variant=variant)
         if result and result.get("ok"):
             with db() as conn:
                 conn.execute(
-                    "update catalog_sessions set followup_sent_at=? where session_id=?",
-                    (iso_now(), session["session_id"]),
+                    "update catalog_sessions set followup_sent_at=?, followup_variant=? where session_id=?",
+                    (iso_now(), variant, session["session_id"]),
                 )
         time.sleep(0.05)
+
+
+def send_catalog_followup_for_session(session_id):
+    with db() as conn:
+        session = conn.execute(
+            """
+            select cs.*, s.delivery_status
+            from catalog_sessions cs
+            left join subscribers s on s.chat_id = cs.chat_id
+            where cs.session_id = ?
+              and cs.chat_id is not null
+              and cs.closed_at is not null
+              and cs.had_lead = 0
+              and cs.followup_sent_at is null
+              and coalesce(s.delivery_status, 'active') = 'active'
+            """,
+            (session_id,),
+        ).fetchone()
+    if not session:
+        return
+    variant = catalog_followup_variant(session["chat_id"])
+    result = send_catalog_followup(session["chat_id"], session["name"], variant=variant)
+    if result and result.get("ok"):
+        with db() as conn:
+            conn.execute(
+                """
+                update catalog_sessions
+                set followup_sent_at=?, followup_variant=?
+                where session_id=? and followup_sent_at is null
+                """,
+                (iso_now(), variant, session_id),
+            )
+
+
+def send_catalog_followup_for_session_async(session_id, delay_seconds=CATALOG_CLOSE_FOLLOWUP_DELAY_SECONDS):
+    if not session_id:
+        return
+
+    def worker():
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        send_catalog_followup_for_session(session_id)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def in_send_window(moment):
@@ -2712,6 +2785,8 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
         name = catalog_user_name(tg_user)
     session_id = catalog_session_id(payload)
     upsert_catalog_session(session_id, event_type, chat_id, username, name, had_lead=event_type == "catalog_lead")
+    if event_type == "catalog_close":
+        send_catalog_followup_for_session_async(session_id)
     with db() as conn:
         cur = conn.execute(
             """
@@ -3171,6 +3246,7 @@ def get_statistics_data(period):
               duration_seconds,
               had_lead,
               followup_sent_at,
+              followup_variant,
               followup_answer,
               followup_answered_at,
               coalesce(nullif(name, ''), username, chat_id, 'Не определён') client_name,
@@ -3180,6 +3256,20 @@ def get_statistics_data(period):
             where 1=1{session_filter}
             order by opened_at desc
             limit 120
+            """,
+            session_params,
+        ).fetchall()
+        catalog_followup_ab_rows_data = conn.execute(
+            f"""
+            select
+              coalesce(followup_variant, 'unknown') variant,
+              count(*) sent,
+              sum(case when followup_answer = 'yes' then 1 else 0 end) yes_count,
+              sum(case when followup_answer = 'no' then 1 else 0 end) no_count
+            from catalog_sessions
+            where followup_sent_at is not null{session_filter}
+            group by coalesce(followup_variant, 'unknown')
+            order by variant
             """,
             session_params,
         ).fetchall()
@@ -3222,6 +3312,7 @@ def get_statistics_data(period):
         "project_rows": project_rows_data,
         "catalog_rows": catalog_rows_data,
         "catalog_session_rows": catalog_session_rows_data,
+        "catalog_followup_ab_rows": catalog_followup_ab_rows_data,
         "seen_rows": seen_rows_data,
         "event_rows": event_rows_data,
     }
@@ -3266,11 +3357,23 @@ def statistics_page(query=None):
           <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
           <td>{format_duration(row['duration_seconds'])}</td>
           <td>{'Да' if row['had_lead'] else 'Нет'}</td>
-          <td>{escape(row['followup_sent_at'] or '')}</td>
+          <td>{escape(row['followup_sent_at'] or '')}<br><span class="muted">{escape(followup_variant_label(row['followup_variant']))}</span></td>
           <td>{escape(row['followup_answer'] or '')}<br><span class="muted">{escape(row['followup_answered_at'] or '')}</span></td>
         </tr>
         """
         for row in data["catalog_session_rows"]
+    )
+    catalog_followup_ab_rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{escape(followup_variant_label(row['variant']))}</strong><br><span class="muted">{escape(row['variant'])}</span></td>
+          <td>{row['sent']}</td>
+          <td>{row['yes_count'] or 0}</td>
+          <td>{row['no_count'] or 0}</td>
+          <td>{conversion(row['yes_count'] or 0, row['sent'])}</td>
+        </tr>
+        """
+        for row in data["catalog_followup_ab_rows"]
     )
     seen_rows = "".join(
         f"""
@@ -3337,6 +3440,10 @@ def statistics_page(query=None):
       <div class="metric"><strong>{conversion(overview['lot_leads'], overview['shows'])}</strong><span>конверсия показов в заявки</span></div>
     </section>
     <div class="panel">
+      <h2>A/B тест follow-up</h2>
+      <div class="table-scroll"><table><thead><tr><th>Вариант</th><th>Отправлено</th><th>Да</th><th>Нет</th><th>Конверсия в Да</th></tr></thead><tbody>{catalog_followup_ab_rows or '<tr><td colspan="5" class="muted">A/B данных пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
       <h2>Статистика по лотам</h2>
       <div class="table-scroll"><table><thead><tr><th>Лот</th><th>Статус</th><th>TG-показы</th><th>TG-клики</th><th>TG-интерес</th><th>TG-заявки</th><th>Каталог просмотры</th><th>Каталог заявки</th><th>Конверсия каталога</th></tr></thead><tbody>{project_rows or '<tr><td colspan="9" class="muted">Данных пока нет.</td></tr>'}</tbody></table></div>
     </div>
@@ -3386,6 +3493,18 @@ def build_statistics_xlsx(period):
         ["Заявок по свободным рассылкам", overview["custom_leads"]],
         ["Конверсия показов в заявки", conversion(overview["lot_leads"], overview["shows"])],
     ]
+    ab_rows = [["Вариант", "Код", "Отправлено", "Да", "Нет", "Конверсия в Да"]]
+    for row in data["catalog_followup_ab_rows"]:
+        ab_rows.append(
+            [
+                followup_variant_label(row["variant"]),
+                row["variant"],
+                row["sent"],
+                row["yes_count"] or 0,
+                row["no_count"] or 0,
+                conversion(row["yes_count"] or 0, row["sent"]),
+            ]
+        )
     project_rows = [["Лот", "Район", "Здание", "Статус", "TG-показы", "TG-клики", "TG-интерес", "TG-заявки", "Каталог просмотры", "Каталог заявки", "Конверсия каталога"]]
     for row in data["project_rows"]:
         project_rows.append(
@@ -3416,7 +3535,7 @@ def build_statistics_xlsx(period):
                 row["district"] or "",
             ]
         )
-    catalog_session_rows = [["Открытие", "Закрытие", "Длительность", "Пользователь", "Username", "Telegram ID", "Была заявка", "Follow-up отправлен", "Ответ", "Дата ответа"]]
+    catalog_session_rows = [["Открытие", "Закрытие", "Длительность", "Пользователь", "Username", "Telegram ID", "Была заявка", "Follow-up отправлен", "A/B вариант", "Ответ", "Дата ответа"]]
     for row in data["catalog_session_rows"]:
         catalog_session_rows.append(
             [
@@ -3428,6 +3547,7 @@ def build_statistics_xlsx(period):
                 row["chat_id"] or "",
                 "Да" if row["had_lead"] else "Нет",
                 row["followup_sent_at"] or "",
+                followup_variant_label(row["followup_variant"]),
                 row["followup_answer"] or "",
                 row["followup_answered_at"] or "",
             ]
@@ -3452,6 +3572,7 @@ def build_statistics_xlsx(period):
     return build_xlsx_package(
         [
             ("Обзор", overview_rows),
+            ("AB Follow-up", ab_rows),
             ("Лоты", project_rows),
             ("Каталог", catalog_rows),
             ("Сессии каталога", catalog_session_rows),
