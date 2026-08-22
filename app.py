@@ -1447,6 +1447,12 @@ def lead_name(user):
     return " ".join([p for p in parts if p]) or user.get("username") or str(user.get("id"))
 
 
+def lead_thank_you_text(user):
+    name = user.get("first_name") or user.get("username")
+    greeting = f"Спасибо, {name}!" if name else "Спасибо!"
+    return f"{greeting} Передал ваш запрос Александру. @roi_counter свяжется с вами в Telegram и подскажет детали."
+
+
 def create_lead(project_id, chat_id, user, method=None, value=None, message=None):
     with db() as conn:
         cur = conn.execute(
@@ -1593,14 +1599,14 @@ def handle_text(message):
                 return
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, "Спасибо, получили контакт. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if sub["state"] == "awaiting_personal_whatsapp":
             create_personal_lead(chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, "Спасибо, получили WhatsApp. @roi_counter свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if not sub["state_project_id"]:
@@ -1611,14 +1617,14 @@ def handle_text(message):
             create_lead(project_id, chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if sub["state"] == "awaiting_custom_whatsapp":
             create_custom_broadcast_lead(project_id, chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, "Спасибо, получили WhatsApp. Менеджер свяжется с вами.", keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         handle_incoming_chat_message(chat_id, user, text)
@@ -1718,7 +1724,7 @@ def handle_callback_inner(callback):
     if data == "personal_tg":
         log_event(chat_id, user, "click_personal_tg", payload=data)
         create_personal_lead(chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, "Спасибо. @roi_counter напишет вам в Telegram.")
+        send_message(chat_id, lead_thank_you_text(user))
         return
 
     if data == "personal_phone":
@@ -1826,7 +1832,7 @@ def handle_callback_inner(callback):
     elif action == "custom_tg" and project_id:
         log_event(chat_id, user, "click_custom_tg", broadcast_id=project_id, payload=data)
         create_custom_broadcast_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, "Спасибо. Менеджер напишет вам в Telegram.")
+        send_message(chat_id, lead_thank_you_text(user))
     elif action == "custom_phone" and project_id:
         log_event(chat_id, user, "click_custom_phone", broadcast_id=project_id, payload=data)
         with db() as conn:
@@ -1857,7 +1863,7 @@ def handle_callback_inner(callback):
     elif action == "contact_tg" and project_id:
         log_event(chat_id, user, "click_contact_tg", project_id=project_id, payload=data)
         create_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, "Спасибо. Менеджер напишет вам в Telegram.")
+        send_message(chat_id, lead_thank_you_text(user))
     elif action == "contact_phone" and project_id:
         log_event(chat_id, user, "click_contact_phone", project_id=project_id, payload=data)
         with db() as conn:
