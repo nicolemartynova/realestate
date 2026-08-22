@@ -2087,6 +2087,13 @@ def process_catalog_followups(moment):
               and cs.had_lead = 0
               and cs.followup_sent_at is null
               and coalesce(s.delivery_status, 'active') = 'active'
+              and not exists (
+                select 1
+                from catalog_sessions prev
+                where prev.chat_id = cs.chat_id
+                  and prev.session_id != cs.session_id
+                  and prev.followup_sent_at is not null
+              )
             order by cs.closed_at asc
             limit 20
             """,
@@ -2117,6 +2124,13 @@ def send_catalog_followup_for_session(session_id):
               and cs.had_lead = 0
               and cs.followup_sent_at is null
               and coalesce(s.delivery_status, 'active') = 'active'
+              and not exists (
+                select 1
+                from catalog_sessions prev
+                where prev.chat_id = cs.chat_id
+                  and prev.session_id != cs.session_id
+                  and prev.followup_sent_at is not null
+              )
             """,
             (session_id,),
         ).fetchone()
