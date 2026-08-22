@@ -1246,13 +1246,14 @@ def send_catalog_positive_reply(chat_id, user):
     keyboard = inline_keyboard(
         [[{"text": "💬 Открыть диалог с @roi_counter", "url": "https://t.me/roi_counter"}]]
     )
-    create_personal_lead(
+    result = send_message(chat_id, text, keyboard=keyboard)
+    create_personal_lead_async(
         chat_id,
         user,
         method="catalog_followup",
         value=f"@{user.get('username')}" if user.get("username") else str(chat_id),
     )
-    return send_message(chat_id, text, keyboard=keyboard)
+    return result
 
 
 def send_filter_rooms_prompt(chat_id):
@@ -1542,6 +1543,15 @@ def create_personal_lead(chat_id, user, method=None, value=None):
         )
     )
     return lead_id
+
+
+def create_personal_lead_async(chat_id, user, method=None, value=None):
+    threading.Thread(
+        target=create_personal_lead,
+        args=(chat_id, dict(user or {})),
+        kwargs={"method": method, "value": value},
+        daemon=True,
+    ).start()
 
 
 def handle_start(chat_id, user):
