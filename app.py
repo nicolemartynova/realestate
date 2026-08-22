@@ -43,6 +43,7 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 TIMEZONE_OFFSET = int(os.environ.get("TIMEZONE_OFFSET", "4"))
 PERF_LOG_ENABLED = os.environ.get("PERF_LOG_ENABLED", "1") != "0"
 PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "belowmarketdubaibot")
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
@@ -1164,6 +1165,15 @@ def send_project(chat_id, project, user=None):
     return True
 
 
+def project_share_url(project_id):
+    bot_link = f"https://t.me/{BOT_USERNAME}?start=lot_{project_id}"
+    text = (
+        "Посмотрите этот лот недвижимости в Дубае ниже рынка в Below Market Dubai:\n"
+        f"{bot_link}"
+    )
+    return "https://t.me/share/url?" + urllib.parse.urlencode({"url": bot_link, "text": text})
+
+
 def project_actions_keyboard(project_id, filters_active=False):
     filter_button = (
         {"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}
@@ -1173,6 +1183,7 @@ def project_actions_keyboard(project_id, filters_active=False):
     rows = [
         [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
         [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
+        [{"text": "↗️ Поделиться лотом", "url": project_share_url(project_id)}],
         [filter_button],
     ]
     if PUBLIC_BASE_URL:
@@ -1590,8 +1601,20 @@ def create_personal_lead_async(chat_id, user, method=None, value=None):
     ).start()
 
 
-def handle_start(chat_id, user):
+def handle_start(chat_id, user, payload=""):
     upsert_subscriber(user, chat_id)
+    if payload.startswith("lot_"):
+        try:
+            project_id = int(payload.split("_", 1)[1])
+        except (TypeError, ValueError):
+            project_id = None
+        project = get_project(project_id) if project_id else None
+        if project and project["status"] == "active":
+            log_event(chat_id, user, "start_shared_lot", project_id=project["id"], payload=payload)
+            send_project(chat_id, project, user=user)
+            return
+        send_no_projects_message(chat_id)
+        return
     send_welcome_message(chat_id)
 
 
@@ -1603,8 +1626,9 @@ def handle_text(message):
     contact = message.get("contact")
     try:
         upsert_subscriber(user, chat_id)
-        if text == "/start":
-            handle_start(chat_id, user)
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            handle_start(chat_id, user, parts[1].strip() if len(parts) > 1 else "")
             return
 
         with db() as conn:
