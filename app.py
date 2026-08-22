@@ -1820,7 +1820,7 @@ def handle_callback_inner(callback):
                 [{"text": "🟢 Оставить WhatsApp", "callback_data": f"custom_whatsapp:{project_id}"}],
             ]
         )
-        send_message(chat_id, "Как вам удобнее, чтобы менеджер связался с вами?", keyboard=keyboard)
+        send_message(chat_id, "Куда отправить подробную информацию?", keyboard=keyboard)
     elif action == "custom_tg" and project_id:
         log_event(chat_id, user, "click_custom_tg", broadcast_id=project_id, payload=data)
         create_custom_broadcast_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
@@ -1851,7 +1851,7 @@ def handle_callback_inner(callback):
                 [{"text": "🟢 Оставить WhatsApp", "callback_data": f"contact_whatsapp:{project_id}"}],
             ]
         )
-        send_message(chat_id, "Как вам удобнее, чтобы менеджер связался с вами?", keyboard=keyboard)
+        send_message(chat_id, "Куда отправить подробную информацию по этому лоту?", keyboard=keyboard)
     elif action == "contact_tg" and project_id:
         log_event(chat_id, user, "click_contact_tg", project_id=project_id, payload=data)
         create_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
