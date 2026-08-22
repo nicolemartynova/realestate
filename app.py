@@ -1222,15 +1222,15 @@ def send_catalog_followup(chat_id, name):
     greeting = f"Здравствуйте, {html.escape(first_name)}!" if first_name else "Здравствуйте!"
     text = (
         f"{greeting}\n"
+        "Это Александр.\n"
         "Спасибо за интерес к моему боту.\n"
-        "Буду рад проконсультировать вас по вопросам приобретения недвижимости в Дубае.\n"
-        "Подскажите, актуальна сейчас покупка?"
+        "Вижу, вы посмотрели каталог. Хотите, я подберу 3-5 лотов ниже рынка под ваш бюджет и цель покупки?"
     )
     keyboard = inline_keyboard(
         [
             [
-                {"text": "✅ Да", "callback_data": "catalog_followup_yes"},
-                {"text": "❌ Нет", "callback_data": "catalog_followup_no"},
+                {"text": "✅ Да, подобрать", "callback_data": "catalog_followup_yes"},
+                {"text": "👀 Пока просто смотрю", "callback_data": "catalog_followup_no"},
             ]
         ]
     )
@@ -1765,7 +1765,7 @@ def handle_callback_inner(callback):
                 """,
                 (iso_now(), chat_id),
             )
-        send_message(chat_id, "Спасибо за ответ. Если покупка станет актуальна, каталог всегда будет доступен здесь.")
+        send_message(chat_id, "Понял, спасибо. Каталог всегда доступен здесь, а когда покупка станет актуальна, я помогу подобрать варианты ниже рынка.")
         return
 
     action, _, raw_project_id = data.partition(":")
