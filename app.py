@@ -1450,7 +1450,7 @@ def lead_name(user):
 def lead_thank_you_text(user):
     name = user.get("first_name") or user.get("username")
     greeting = f"Спасибо, {name}!" if name else "Спасибо!"
-    return f"{greeting} Передал ваш запрос Александру. @roi_counter свяжется с вами в Telegram и подскажет детали."
+    return f"{greeting} Я получил ваш запрос. Напишу вам в Telegram и подскажу детали по объекту."
 
 
 def create_lead(project_id, chat_id, user, method=None, value=None, message=None):
