@@ -39,6 +39,7 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
+ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", PUBLIC_BASE_URL).rstrip("/")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 TIMEZONE_OFFSET = int(os.environ.get("TIMEZONE_OFFSET", "4"))
 PERF_LOG_ENABLED = os.environ.get("PERF_LOG_ENABLED", "1") != "0"
@@ -341,6 +342,23 @@ def init_db():
               direction text not null,
               text text not null,
               created_at text not null
+            );
+
+            create table if not exists crm_notes (
+              id integer primary key autoincrement,
+              chat_id integer not null,
+              text text not null,
+              created_at text not null
+            );
+
+            create table if not exists crm_reminders (
+              id integer primary key autoincrement,
+              chat_id integer not null,
+              text text not null,
+              remind_at text not null,
+              status text not null default 'scheduled',
+              created_at text not null,
+              sent_at text
             );
             """
         )
@@ -2162,6 +2180,46 @@ def send_catalog_followup_for_session_async(session_id, delay_seconds=CATALOG_CL
     threading.Thread(target=worker, daemon=True).start()
 
 
+def process_crm_reminders(moment):
+    cutoff = moment.replace(microsecond=0).isoformat()
+    with db() as conn:
+        reminders = conn.execute(
+            """
+            select r.*, s.username, s.first_name, s.last_name,
+              trim(
+                coalesce((select group_concat(contact_value, ' | ') from leads where chat_id = r.chat_id and contact_value is not null and contact_value != ''), '') || ' | ' ||
+                coalesce((select group_concat(contact_value, ' | ') from custom_broadcast_leads where chat_id = r.chat_id and contact_value is not null and contact_value != ''), '') || ' | ' ||
+                coalesce((select group_concat(contact_value, ' | ') from personal_leads where chat_id = r.chat_id and contact_value is not null and contact_value != ''), '')
+              ) contact_values
+            from crm_reminders r
+            left join subscribers s on s.chat_id = r.chat_id
+            where r.status = 'scheduled' and r.remind_at <= ?
+            order by r.remind_at asc
+            limit 20
+            """,
+            (cutoff,),
+        ).fetchall()
+    for reminder in reminders:
+        name = crm_client_name(reminder)
+        contact = reminder["contact_values"].strip(" |") or (f"@{reminder['username']}" if reminder["username"] else f"Chat ID: {reminder['chat_id']}")
+        url = crm_client_url(reminder["chat_id"])
+        text = (
+            "⏰ CRM-напоминание\n\n"
+            f"Клиент: {html.escape(name)}\n"
+            f"Контакт: {html.escape(contact)}\n"
+            f"Задача: {html.escape(reminder['text'])}\n"
+            f"Карточка: <a href=\"{html.escape(url)}\">открыть клиента</a>"
+        )
+        for admin_chat_id in [item.strip() for item in ADMIN_CHAT_ID.split(",") if item.strip()]:
+            send_message(admin_chat_id, text)
+            time.sleep(0.05)
+        with db() as conn:
+            conn.execute(
+                "update crm_reminders set status='sent', sent_at=? where id=? and status='scheduled'",
+                (iso_now(), reminder["id"]),
+            )
+
+
 def in_send_window(moment):
     t = moment.time()
     return SEND_WINDOW_START <= t <= SEND_WINDOW_END
@@ -2196,6 +2254,7 @@ def scheduler_loop(stop_event):
     while not stop_event.is_set():
         try:
             moment = now_local()
+            process_crm_reminders(moment)
             process_catalog_followups(moment)
             if in_send_window(moment):
                 with db() as conn:
@@ -2891,6 +2950,7 @@ def layout(title, content, active="projects", message=""):
     nav = [
         ("projects", "/", "Объекты"),
         ("new", "/project/new", "Добавить"),
+        ("crm", "/crm", "CRM"),
         ("leads", "/leads", "Заявки"),
         ("chats", "/chats", "Чаты"),
         ("stats", "/stats", "Статистика"),
@@ -2991,6 +3051,14 @@ textarea { min-height:110px; resize:vertical; }
 .chat-compose label { color:var(--text); font-size:13px; }
 .chat-compose textarea { min-height:118px; font-size:15px; }
 .chat-compose p { margin:10px 0 0; }
+.crm-header { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:start; }
+.crm-card-title { margin:0 0 4px; font-size:20px; }
+.crm-contact { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.crm-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 9px; border-radius:999px; background:#eef4f0; border:1px solid var(--line); color:var(--text); font-size:13px; text-decoration:none; }
+.crm-timeline { display:grid; gap:10px; }
+.crm-timeline-item { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#fff; }
+.crm-timeline-item strong { display:block; margin-bottom:3px; }
+.crm-two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 .media-picker { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; margin-top:12px; }
 .media-option { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fafbf9; display:grid; gap:8px; }
 .media-option img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px; background:#e7ebe7; }
@@ -3002,7 +3070,7 @@ textarea { min-height:110px; resize:vertical; }
 .login form { width:min(420px,calc(100vw - 32px)); background:#fff; border:1px solid var(--line); border-radius:8px; padding:26px; display:grid; gap:14px; }
 .login h1 { font-size:24px; }
 .muted { color:var(--muted); }
-@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { height:auto; min-height:0; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { height:calc(100vh - 190px); min-height:520px; } .chat-sidebar { max-height:360px; } }
+@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout,.crm-two-col,.crm-header { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { height:auto; min-height:0; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { height:calc(100vh - 190px); min-height:520px; } .chat-sidebar { max-height:360px; } }
 """
 
 APP_CSS = """
@@ -4059,6 +4127,275 @@ def lead_status_select(current):
     )
 
 
+def crm_client_name(row):
+    name = " ".join(
+        part for part in [row["first_name"], row["last_name"]] if part
+    ).strip()
+    return name or row["username"] or str(row["chat_id"])
+
+
+def crm_contact_html(row):
+    items = []
+    if row["username"]:
+        username = row["username"]
+        items.append(f'<a class="crm-pill" href="https://t.me/{escape(username)}">✈️ @{escape(username)}</a>')
+    items.append(f'<span class="crm-pill">ID {escape(row["chat_id"])}</span>')
+    if row["contact_values"]:
+        for value in str(row["contact_values"]).split(" | "):
+            value = value.strip()
+            if value:
+                items.append(f'<span class="crm-pill">☎ {escape(value)}</span>')
+    return "".join(items)
+
+
+def crm_client_url(chat_id):
+    path = f"/crm/client?chat_id={urllib.parse.quote(str(chat_id))}"
+    return f"{ADMIN_BASE_URL}{path}" if ADMIN_BASE_URL else path
+
+
+def crm_client_summary(chat_id):
+    with db() as conn:
+        row = conn.execute(
+            """
+            select
+              s.*,
+              coalesce((select group_concat(contact_value, ' | ') from leads where chat_id = s.chat_id and contact_value is not null and contact_value != ''), '') ||
+                case when exists(select 1 from leads where chat_id = s.chat_id and contact_value is not null and contact_value != '')
+                       and (exists(select 1 from custom_broadcast_leads where chat_id = s.chat_id and contact_value is not null and contact_value != '')
+                            or exists(select 1 from personal_leads where chat_id = s.chat_id and contact_value is not null and contact_value != ''))
+                     then ' | ' else '' end ||
+                coalesce((select group_concat(contact_value, ' | ') from custom_broadcast_leads where chat_id = s.chat_id and contact_value is not null and contact_value != ''), '') ||
+                case when exists(select 1 from custom_broadcast_leads where chat_id = s.chat_id and contact_value is not null and contact_value != '')
+                       and exists(select 1 from personal_leads where chat_id = s.chat_id and contact_value is not null and contact_value != '')
+                     then ' | ' else '' end ||
+                coalesce((select group_concat(contact_value, ' | ') from personal_leads where chat_id = s.chat_id and contact_value is not null and contact_value != ''), '') contact_values
+            from subscribers s
+            where s.chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+    return row
+
+
+def crm_page(query=None, message=""):
+    query = query or {}
+    search = query.get("q", [""])[0].strip()
+    with db() as conn:
+        clients = conn.execute(
+            """
+            select
+              s.*,
+              (select count(*) from leads where chat_id = s.chat_id) lot_leads,
+              (select count(*) from personal_leads where chat_id = s.chat_id) personal_leads,
+              (select count(*) from custom_broadcast_leads where chat_id = s.chat_id) custom_leads,
+              (select count(*) from web_leads where contact_value in (
+                select contact_value from leads where chat_id = s.chat_id
+                union select contact_value from personal_leads where chat_id = s.chat_id
+                union select contact_value from custom_broadcast_leads where chat_id = s.chat_id
+              )) web_leads,
+              (select count(*) from chat_messages where chat_id = s.chat_id) messages,
+              (select count(*) from seen_projects where chat_id = s.chat_id) views,
+              (select created_at from chat_messages where chat_id = s.chat_id order by created_at desc limit 1) last_message_at,
+              (select remind_at from crm_reminders where chat_id = s.chat_id and status='scheduled' order by remind_at asc limit 1) next_reminder_at,
+              trim(
+                coalesce((select group_concat(contact_value, ' ') from leads where chat_id = s.chat_id), '') || ' ' ||
+                coalesce((select group_concat(contact_value, ' ') from custom_broadcast_leads where chat_id = s.chat_id), '') || ' ' ||
+                coalesce((select group_concat(contact_value, ' ') from personal_leads where chat_id = s.chat_id), '')
+              ) contact_values
+            from subscribers s
+            order by coalesce(last_message_at, s.last_seen_at, s.subscribed_at) desc
+            """
+        ).fetchall()
+    filtered = []
+    needle = search.casefold()
+    for row in clients:
+        haystack = " ".join(
+            str(part or "")
+            for part in [
+                row["chat_id"],
+                row["username"],
+                row["first_name"],
+                row["last_name"],
+                row["contact_values"],
+            ]
+        ).casefold()
+        if not needle or needle in haystack:
+            filtered.append(row)
+    rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{escape(crm_client_name(row))}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Chat ID: ' + escape(row['chat_id'])}</span></td>
+          <td>{subscriber_tag_label(row['subscriber_tag'])}</td>
+          <td>{row['lot_leads'] + row['personal_leads'] + row['custom_leads'] + row['web_leads']}</td>
+          <td>{row['views']}</td>
+          <td>{row['messages']}</td>
+          <td>{escape(row['next_reminder_at'] or '')}</td>
+          <td><a class="button secondary" href="/crm/client?chat_id={escape(row['chat_id'])}">Карточка</a></td>
+        </tr>
+        """
+        for row in filtered[:200]
+    )
+    content = f"""
+    <form class="panel" method="get" action="/crm">
+      <h2>Клиенты</h2>
+      <div class="form-grid">
+        <label class="wide">Поиск по имени, username, Telegram ID или контакту<input name="q" value="{escape(search)}" placeholder="Например: nika, @username, телефон"></label>
+      </div>
+      <p class="actions"><button>Найти</button>{'<a class="button secondary" href="/crm">Сбросить</a>' if search else ''}</p>
+    </form>
+    <div class="panel">
+      <h2>CRM-клиенты</h2>
+      <div class="table-scroll"><table><thead><tr><th>Клиент</th><th>Сегмент</th><th>Заявки</th><th>Просмотры</th><th>Сообщения</th><th>Следующее напоминание</th><th></th></tr></thead><tbody>{rows or '<tr><td colspan="7" class="muted">Клиенты не найдены.</td></tr>'}</tbody></table></div>
+    </div>
+    """
+    return layout("CRM", content, "crm", message)
+
+
+def crm_client_page(chat_id, message=""):
+    client = crm_client_summary(chat_id)
+    if not client:
+        return crm_page(message="Клиент не найден")
+    with db() as conn:
+        lot_leads = conn.execute(
+            """
+            select l.*, p.title project_title, p.district
+            from leads l
+            left join projects p on p.id = l.project_id
+            where l.chat_id = ?
+            order by l.created_at desc
+            """,
+            (chat_id,),
+        ).fetchall()
+        personal_leads = conn.execute("select * from personal_leads where chat_id = ? order by created_at desc", (chat_id,)).fetchall()
+        custom_leads = conn.execute(
+            """
+            select l.*, b.text broadcast_text
+            from custom_broadcast_leads l
+            left join custom_broadcasts b on b.id = l.broadcast_id
+            where l.chat_id = ?
+            order by l.created_at desc
+            """,
+            (chat_id,),
+        ).fetchall()
+        seen = conn.execute(
+            """
+            select sp.seen_at, p.title, p.district, p.building, p.status
+            from seen_projects sp
+            left join projects p on p.id = sp.project_id
+            where sp.chat_id = ?
+            order by sp.seen_at desc
+            limit 20
+            """,
+            (chat_id,),
+        ).fetchall()
+        events = conn.execute(
+            """
+            select created_at, event_type, project_id, payload
+            from bot_events
+            where chat_id = ?
+            order by created_at desc
+            limit 20
+            """,
+            (chat_id,),
+        ).fetchall()
+        messages = conn.execute("select * from chat_messages where chat_id = ? order by created_at desc limit 20", (chat_id,)).fetchall()
+        notes = conn.execute("select * from crm_notes where chat_id = ? order by created_at desc", (chat_id,)).fetchall()
+        reminders = conn.execute("select * from crm_reminders where chat_id = ? order by remind_at desc", (chat_id,)).fetchall()
+    lot_lead_rows = "".join(
+        f"<tr><td>{escape(row['created_at'])}</td><td>{escape(row['project_title'] or 'Лот удалён')}<br><span class='muted'>{escape(row['district'] or '')}</span></td><td>{escape(row['contact_method'])}<br>{escape(row['contact_value'])}</td><td>{escape(LEAD_STATUS_LABELS.get(row['status'], row['status']))}</td></tr>"
+        for row in lot_leads
+    )
+    personal_rows = "".join(
+        f"<tr><td>{escape(row['created_at'])}</td><td>Персональный подбор</td><td>{escape(row['contact_method'])}<br>{escape(row['contact_value'])}</td><td>{escape(LEAD_STATUS_LABELS.get(row['status'], row['status']))}</td></tr>"
+        for row in personal_leads
+    )
+    custom_rows = "".join(
+        f"<tr><td>{escape(row['created_at'])}</td><td>{escape((row['broadcast_text'] or '')[:90])}</td><td>{escape(row['contact_method'])}<br>{escape(row['contact_value'])}</td><td>{escape(LEAD_STATUS_LABELS.get(row['status'], row['status']))}</td></tr>"
+        for row in custom_leads
+    )
+    seen_rows = "".join(
+        f"<tr><td>{escape(row['seen_at'])}</td><td>{escape(row['title'] or 'Лот удалён')}<br><span class='muted'>{escape(row['district'] or '')}, {escape(row['building'] or '')}</span></td><td>{escape(row['status'] or '')}</td></tr>"
+        for row in seen
+    )
+    timeline_items = []
+    for row in events:
+        timeline_items.append((row["created_at"], event_label(row["event_type"]), row["payload"] or ""))
+    for row in messages:
+        label = "Сообщение клиента" if row["direction"] == "user" else "Ответ менеджера"
+        timeline_items.append((row["created_at"], label, row["text"]))
+    timeline_items.sort(key=lambda item: item[0] or "", reverse=True)
+    timeline = "".join(
+        f"<div class='crm-timeline-item'><strong>{escape(label)}</strong><span class='muted'>{escape(date)}</span>{f'<p>{escape(text)}</p>' if text else ''}</div>"
+        for date, label, text in timeline_items[:30]
+    )
+    note_rows = "".join(
+        f"<div class='crm-timeline-item'><strong>{escape(row['created_at'])}</strong><p>{escape(row['text'])}</p></div>"
+        for row in notes
+    )
+    reminder_rows = "".join(
+        f"<tr><td>{escape(row['remind_at'])}</td><td>{escape(row['text'])}</td><td>{'Отправлено' if row['status'] == 'sent' else 'Запланировано'}</td><td>{escape(row['sent_at'] or '')}</td></tr>"
+        for row in reminders
+    )
+    content = f"""
+    <div class="panel">
+      <div class="crm-header">
+        <div>
+          <p class="eyebrow">Карточка клиента</p>
+          <h2 class="crm-card-title">{escape(crm_client_name(client))}</h2>
+          <p class="muted">{'@' + escape(client['username']) if client['username'] else 'Chat ID: ' + escape(client['chat_id'])}</p>
+          <div class="crm-contact">{crm_contact_html(client)}</div>
+        </div>
+        <p class="actions">
+          <a class="button secondary" href="/chats?chat_id={escape(chat_id)}">Открыть чат</a>
+          <a class="button secondary" href="/crm">К CRM</a>
+        </p>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="metric"><strong>{len(lot_leads) + len(personal_leads) + len(custom_leads)}</strong><span>заявок</span></div>
+      <div class="metric"><strong>{len(seen)}</strong><span>последних просмотров лотов</span></div>
+      <div class="metric"><strong>{len(messages)}</strong><span>последних сообщений</span></div>
+      <div class="metric"><strong>{len([r for r in reminders if r['status'] == 'scheduled'])}</strong><span>активных напоминаний</span></div>
+    </div>
+    <div class="crm-two-col">
+      <form class="panel" method="post" action="/crm/note">
+        <h2>Заметка</h2>
+        <input type="hidden" name="chat_id" value="{escape(chat_id)}">
+        <label>Комментарий менеджера<textarea name="text" required placeholder="Например: ищет 1BR до 1.5M, готов к покупке в сентябре"></textarea></label>
+        <p><button>Добавить заметку</button></p>
+      </form>
+      <form class="panel" method="post" action="/crm/reminder">
+        <h2>Напоминание</h2>
+        <input type="hidden" name="chat_id" value="{escape(chat_id)}">
+        <label>Когда напомнить<input type="datetime-local" name="remind_at" required></label>
+        <label>Что сделать<textarea name="text" required placeholder="Связаться, уточнить бюджет, отправить подборку"></textarea></label>
+        <p><button>Поставить напоминание</button></p>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Напоминания</h2>
+      <div class="table-scroll"><table><thead><tr><th>Когда</th><th>Задача</th><th>Статус</th><th>Отправлено</th></tr></thead><tbody>{reminder_rows or '<tr><td colspan="4" class="muted">Напоминаний пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>Заметки</h2>
+      <div class="crm-timeline">{note_rows or '<p class="muted">Заметок пока нет.</p>'}</div>
+    </div>
+    <div class="panel">
+      <h2>Заявки</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Источник</th><th>Контакт</th><th>Статус</th></tr></thead><tbody>{lot_lead_rows + personal_rows + custom_rows or '<tr><td colspan="4" class="muted">Заявок пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>Просмотренные лоты</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Лот</th><th>Статус</th></tr></thead><tbody>{seen_rows or '<tr><td colspan="3" class="muted">Просмотров пока нет.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>История действий и переписки</h2>
+      <div class="crm-timeline">{timeline or '<p class="muted">Истории пока нет.</p>'}</div>
+    </div>
+    """
+    return layout("CRM: карточка клиента", content, "crm", message)
+
+
 def leads_page():
     with db() as conn:
         leads = conn.execute(
@@ -4699,6 +5036,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/project/edit":
             project = get_project(int(query.get("id", ["0"])[0]))
             self.send_html(project_form(project) if project else dashboard("Объект не найден"))
+        elif path == "/crm":
+            self.send_html(crm_page(query))
+        elif path == "/crm/client":
+            self.send_html(crm_client_page(query.get("chat_id", [""])[0]))
         elif path == "/leads":
             self.send_html(leads_page())
         elif path == "/stats":
@@ -4906,6 +5247,40 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("update subscribers set subscriber_tag = ? where chat_id = ?", (tag or None, chat_id))
             self.redirect("/subscribers")
+        elif path == "/crm/note":
+            form = parse_form(self)
+            chat_id = form_value(form, "chat_id")
+            text = form_value(form, "text").strip()
+            if chat_id and text:
+                with db() as conn:
+                    conn.execute(
+                        "insert into crm_notes(chat_id, text, created_at) values (?, ?, ?)",
+                        (chat_id, text, iso_now()),
+                    )
+                self.redirect(f"/crm/client?chat_id={urllib.parse.quote(str(chat_id))}")
+            else:
+                self.send_html(crm_client_page(chat_id, "Введите текст заметки"), status=400)
+        elif path == "/crm/reminder":
+            form = parse_form(self)
+            chat_id = form_value(form, "chat_id")
+            text = form_value(form, "text").strip()
+            remind_at_raw = form_value(form, "remind_at").strip()
+            try:
+                remind_at = datetime.fromisoformat(remind_at_raw).replace(microsecond=0).isoformat()
+            except (TypeError, ValueError):
+                remind_at = ""
+            if chat_id and text and remind_at:
+                with db() as conn:
+                    conn.execute(
+                        """
+                        insert into crm_reminders(chat_id, text, remind_at, status, created_at)
+                        values (?, ?, ?, 'scheduled', ?)
+                        """,
+                        (chat_id, text, remind_at, iso_now()),
+                    )
+                self.redirect(f"/crm/client?chat_id={urllib.parse.quote(str(chat_id))}")
+            else:
+                self.send_html(crm_client_page(chat_id, "Заполните текст и дату напоминания"), status=400)
         elif path == "/broadcast/create":
             form = parse_form(self)
             send_at_raw = form_value(form, "send_at")
