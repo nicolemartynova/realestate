@@ -3180,6 +3180,7 @@ tr:last-child td { border-bottom:0; }
 .status.archived { background:#eee; color:#777; }
 .actions { display:flex; gap:8px; flex-wrap:wrap; }
 button, .button { border:0; background:var(--accent); color:#fff; padding:9px 12px; border-radius:7px; font-weight:700; cursor:pointer; text-decoration:none; display:inline-block; }
+button.icon-button, .button.icon-button { width:40px; height:40px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:22px; line-height:1; }
 button.secondary, .button.secondary { background:#eef2ef; color:var(--text); border:1px solid var(--line); }
 button.danger { background:var(--danger); }
 form.inline { display:inline; }
@@ -3219,6 +3220,16 @@ textarea { min-height:110px; resize:vertical; }
 .crm-timeline-item { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#fff; }
 .crm-timeline-item strong { display:block; margin-bottom:3px; }
 .crm-two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.crm-toolbar { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center; margin-bottom:16px; }
+.crm-toolbar form { margin:0; }
+.crm-toolbar-search { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; }
+.crm-toolbar-actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; }
+.modal { width:min(860px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:10px; padding:0; box-shadow:0 24px 70px rgba(0,0,0,.22); }
+.modal::backdrop { background:rgba(23,34,29,.38); }
+.modal-panel { padding:22px; }
+.modal-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:16px; }
+.modal-header h2 { margin:0; }
+.modal-close { background:#eef2ef; color:var(--text); border:1px solid var(--line); width:36px; height:36px; padding:0; border-radius:999px; font-size:20px; line-height:1; }
 .crm-board { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(280px,320px); gap:14px; overflow:auto; padding-bottom:10px; }
 .crm-column { background:#eef2ef; border:1px solid var(--line); border-radius:8px; padding:12px; min-height:420px; }
 .crm-column h3 { margin:0 0 10px; display:flex; justify-content:space-between; gap:8px; font-size:15px; }
@@ -4404,10 +4415,34 @@ def crm_page(query=None, message=""):
         """
         for status in statuses
     )
+    status_rows = "".join(
+        f"<tr><td>{escape(row['position'])}</td><td>{escape(row['name'])}</td><td>{len(cards_by_status.get(row['id'], []))}</td></tr>"
+        for row in statuses
+    )
     content = f"""
-    <div class="crm-two-col">
-      <form class="panel" method="post" action="/crm/card/create">
-        <h2>Новая карточка</h2>
+    <div class="crm-toolbar">
+      <form method="get" action="/crm" class="crm-toolbar-search">
+        <input name="q" value="{escape(search)}" placeholder="Поиск: имя, контакт, бюджет, запрос, Telegram ID">
+        <button>Найти</button>
+        {'<a class="button secondary" href="/crm">Сбросить</a>' if search else ''}
+      </form>
+      <div class="crm-toolbar-actions">
+        <button type="button" class="icon-button" title="Добавить карточку" onclick="document.getElementById('crm-card-dialog').showModal()">+</button>
+        <button type="button" class="secondary" onclick="document.getElementById('crm-settings-dialog').showModal()">Настройки</button>
+      </div>
+    </div>
+    <div class="crm-board">
+      {columns}
+    </div>
+    <dialog class="modal" id="crm-card-dialog">
+      <form class="modal-panel" method="post" action="/crm/card/create">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">CRM</p>
+            <h2>Новая карточка</h2>
+          </div>
+          <button class="modal-close" type="button" onclick="this.closest('dialog').close()">×</button>
+        </div>
         <div class="form-grid">
           <label>Статус<select name="status_id">{crm_status_options()}</select></label>
           <label>Название карточки<input name="title" required placeholder="Например: 1BR для инвестиций"></label>
@@ -4418,25 +4453,31 @@ def crm_page(query=None, message=""):
           <label>Источник<input name="source" placeholder="Бот, рекомендация, Instagram"></label>
           <label class="wide">Запрос<textarea name="request" placeholder="Что ищет клиент, район, комнаты, цель покупки"></textarea></label>
         </div>
-        <p><button>Создать карточку</button></p>
+        <p class="actions"><button>Создать карточку</button><button class="secondary" type="button" onclick="this.closest('dialog').close()">Отмена</button></p>
       </form>
-      <form class="panel" method="post" action="/crm/status/create">
-        <h2>Новая колонка</h2>
-        <label>Название статуса<input name="name" required placeholder="Например: Документы"></label>
-        <p><button>Добавить колонку</button></p>
+    </dialog>
+    <dialog class="modal" id="crm-settings-dialog">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Настройки CRM</p>
+            <h2>Колонки и статусы</h2>
+          </div>
+          <button class="modal-close" type="button" onclick="this.closest('dialog').close()">×</button>
+        </div>
+        <form method="post" action="/crm/status/create">
+          <label>Новая колонка<input name="name" required placeholder="Например: Документы"></label>
+          <p class="actions"><button>Добавить колонку</button></p>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Порядок</th><th>Колонка</th><th>Карточек</th></tr></thead>
+            <tbody>{status_rows}</tbody>
+          </table>
+        </div>
         <p class="muted">Колонки можно создавать кастомно. Сейчас уже добавлена базовая воронка агента недвижимости.</p>
-      </form>
-    </div>
-    <form class="panel" method="get" action="/crm">
-      <h2>Поиск</h2>
-      <div class="form-grid">
-        <label class="wide">Поиск по карточкам<input name="q" value="{escape(search)}" placeholder="Имя, контакт, бюджет, запрос, Telegram ID"></label>
       </div>
-      <p class="actions"><button>Найти</button>{'<a class="button secondary" href="/crm">Сбросить</a>' if search else ''}</p>
-    </form>
-    <div class="crm-board">
-      {columns}
-    </div>
+    </dialog>
     """
     return layout("CRM", content, "crm", message)
 
