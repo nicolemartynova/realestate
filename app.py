@@ -3182,7 +3182,7 @@ tr:last-child td { border-bottom:0; }
 button, .button { border:0; background:var(--accent); color:#fff; padding:9px 12px; border-radius:7px; font-weight:700; cursor:pointer; text-decoration:none; display:inline-block; }
 button.icon-button, .button.icon-button { width:40px; height:40px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:22px; line-height:1; }
 button.secondary, .button.secondary { background:#eef2ef; color:var(--text); border:1px solid var(--line); }
-button.danger { background:var(--danger); }
+button.danger, .button.danger { background:var(--danger); color:#fff; }
 form.inline { display:inline; }
 .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
 label { display:grid; gap:6px; color:var(--muted); font-weight:700; font-size:12px; }
@@ -4416,7 +4416,25 @@ def crm_page(query=None, message=""):
         for status in statuses
     )
     status_rows = "".join(
-        f"<tr><td>{escape(row['position'])}</td><td>{escape(row['name'])}</td><td>{len(cards_by_status.get(row['id'], []))}</td></tr>"
+        f"""
+        <tr>
+          <td>{escape(row['position'])}</td>
+          <td>
+            <form class="actions" method="post" action="/crm/status/update">
+              <input type="hidden" name="id" value="{row['id']}">
+              <input name="name" required value="{escape(row['name'])}">
+              <button class="secondary">Переименовать</button>
+            </form>
+          </td>
+          <td>{len(cards_by_status.get(row['id'], []))}</td>
+          <td>
+            <form class="inline" method="post" action="/crm/status/delete" onsubmit="return confirm('Удалить колонку? Карточки будут перенесены в первую оставшуюся колонку.')">
+              <input type="hidden" name="id" value="{row['id']}">
+              <button class="danger">Удалить</button>
+            </form>
+          </td>
+        </tr>
+        """
         for row in statuses
     )
     content = f"""
@@ -4471,7 +4489,7 @@ def crm_page(query=None, message=""):
         </form>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Порядок</th><th>Колонка</th><th>Карточек</th></tr></thead>
+            <thead><tr><th>Порядок</th><th>Колонка</th><th>Карточек</th><th></th></tr></thead>
             <tbody>{status_rows}</tbody>
           </table>
         </div>
@@ -4495,6 +4513,10 @@ def crm_board_card(card):
         <input type="hidden" name="id" value="{card['id']}">
         <select name="status_id">{crm_status_options(card['status_id'])}</select>
         <button class="secondary">Перенести</button>
+      </form>
+      <form method="post" action="/crm/card/delete" onsubmit="return confirm('Удалить CRM-карточку? Заявки и чат клиента останутся.')">
+        <input type="hidden" name="id" value="{card['id']}">
+        <button class="danger">Удалить</button>
       </form>
     </article>
     """
@@ -4560,10 +4582,14 @@ def crm_card_page(card_id, message=""):
             {f'<a class="crm-pill" href="/crm/client?chat_id={escape(chat_id)}">Telegram ID {escape(chat_id)}</a>' if chat_id else ''}
           </div>
         </div>
-        <p class="actions">
+        <div class="actions">
           {f'<a class="button secondary" href="/chats?chat_id={escape(chat_id)}">Открыть чат</a>' if chat_id else ''}
           <a class="button secondary" href="/crm">К доске</a>
-        </p>
+          <form class="inline" method="post" action="/crm/card/delete" onsubmit="return confirm('Удалить CRM-карточку? Заявки и чат клиента останутся.')">
+            <input type="hidden" name="id" value="{card['id']}">
+            <button class="danger">Удалить карточку</button>
+          </form>
+        </div>
       </div>
       {f'<p>{escape(card["request"])}</p>' if card["request"] else ''}
       {f'<p class="muted">Источник: {escape(card["source"])}</p>' if card["source"] else ''}
@@ -5671,6 +5697,26 @@ class Handler(BaseHTTPRequestHandler):
                         (name, max_position + 1, iso_now()),
                     )
             self.redirect("/crm")
+        elif path == "/crm/status/update":
+            form = parse_form(self)
+            status_id = form_value(form, "id")
+            name = form_value(form, "name").strip()
+            if status_id and name:
+                with db() as conn:
+                    conn.execute("update crm_statuses set name = ? where id = ?", (name, status_id))
+            self.redirect("/crm")
+        elif path == "/crm/status/delete":
+            form = parse_form(self)
+            status_id = form_value(form, "id")
+            if status_id:
+                with db() as conn:
+                    statuses = conn.execute("select id from crm_statuses order by position, id").fetchall()
+                    if len(statuses) > 1:
+                        fallback = next((row["id"] for row in statuses if str(row["id"]) != str(status_id)), None)
+                        if fallback:
+                            conn.execute("update crm_cards set status_id = ?, updated_at = ? where status_id = ?", (fallback, iso_now(), status_id))
+                            conn.execute("delete from crm_statuses where id = ?", (status_id,))
+            self.redirect("/crm")
         elif path == "/crm/card/create":
             form = parse_form(self)
             status_id = form_value(form, "status_id")
@@ -5742,6 +5788,15 @@ class Handler(BaseHTTPRequestHandler):
                     "update crm_cards set status_id=?, updated_at=? where id=?",
                     (status_id, iso_now(), card_id),
                 )
+            self.redirect("/crm")
+        elif path == "/crm/card/delete":
+            form = parse_form(self)
+            card_id = form_value(form, "id")
+            if card_id:
+                with db() as conn:
+                    conn.execute("delete from crm_notes where card_id = ?", (card_id,))
+                    conn.execute("delete from crm_reminders where card_id = ?", (card_id,))
+                    conn.execute("delete from crm_cards where id = ?", (card_id,))
             self.redirect("/crm")
         elif path == "/broadcast/create":
             form = parse_form(self)
