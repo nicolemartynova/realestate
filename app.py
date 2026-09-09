@@ -2775,7 +2775,7 @@ def app_filter_options():
     return [row["district"] for row in districts], [row["rooms"] for row in rooms]
 
 
-def app_projects_page(query=None, message=""):
+def app_projects_page(query=None, message="", base_path="/app"):
     query = query or {}
     search = (query.get("q", [""])[0] or "").strip()
     district = (query.get("district", [""])[0] or "").strip()
@@ -2818,32 +2818,35 @@ def app_projects_page(query=None, message=""):
         f'<option value="{escape(item)}"{" selected" if item == rooms else ""}>{escape(item)}</option>'
         for item in rooms_options
     )
-    cards = "".join(app_project_card(project) for project in projects)
+    root_path = base_path or "/"
+    lot_path = f"{base_path}/lot" if base_path else "/lot"
+    lead_path = f"{base_path}/lead" if base_path else "/lead"
+    cards = "".join(app_project_card(project, lot_path) for project in projects)
     content = f"""
     <section class="app-hero">
       <div class="app-brand">Below Market Dubai</div>
       <h1>Лоты недвижимости в Дубае ниже рынка</h1>
       <p>Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами.</p>
     </section>
-    <form class="app-filters" method="get" action="/app">
+    <form class="app-filters" method="get" action="{escape(root_path)}">
       <input name="q" value="{escape(search)}" placeholder="Район, здание или название">
       <select name="district">{district_options}</select>
       <select name="rooms">{rooms_select}</select>
       <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="Цена до, AED">
       <button>Найти</button>
-      <a class="app-button secondary" href="/app">Сбросить</a>
+      <a class="app-button secondary" href="{escape(root_path)}">Сбросить</a>
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else '<div class="empty-state">По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор.</div>'}
     """
     return app_layout("Below Market Dubai", content, message, catalog_event="catalog_open")
 
 
-def app_project_card(project):
+def app_project_card(project, lot_path="/app/lot"):
     cover = project_cover(project["id"])
     deal_tags = app_deal_tags(project)
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     return f"""
-    <a class="lot-card" href="/app/lot?id={project['id']}">
+    <a class="lot-card" href="{escape(lot_path)}?id={project['id']}">
       <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else 'Фото скоро появятся'}</div>
       <div class="lot-body">
         <div class="lot-title"><span>{escape(project['title'])}</span><span class="lot-price">{money(project['price'])} AED</span></div>
@@ -2872,10 +2875,12 @@ def app_deal_tags(project):
     return tags
 
 
-def app_project_page(project_id, message=""):
+def app_project_page(project_id, message="", base_path="/app"):
     project = get_project(project_id)
     if not project or project["status"] != "active":
-        return app_projects_page(message="Лот не найден или больше не актуален.")
+        return app_projects_page(message="Лот не найден или больше не актуален.", base_path=base_path)
+    root_path = base_path or "/"
+    lead_path = f"{base_path}/lead" if base_path else "/lead"
     media = get_project_media(project_id)
     gallery_items = []
     for item in media:
@@ -2915,7 +2920,7 @@ def app_project_page(project_id, message=""):
             if original_discount and original_discount > 0:
                 fact_html += f'<div class="fact deal-tag"><small>Ниже original price</small>на {original_discount}%</div>'
     content = f"""
-    <a class="back-link" href="/app">← Все лоты</a>
+    <a class="back-link" href="{escape(root_path)}">← Все лоты</a>
     <section class="lot-detail">
       <div class="gallery">{''.join(gallery_items) or '<div class="gallery-item">Фото скоро появятся</div>'}</div>
       <aside class="detail-panel">
@@ -2926,7 +2931,7 @@ def app_project_page(project_id, message=""):
         <div class="detail-price">{money(project['price'])} AED</div>
         <div class="facts">{fact_html}</div>
         {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
-        <form class="lead-form" method="post" action="/app/lead">
+        <form class="lead-form" method="post" action="{escape(lead_path)}">
           <input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
           <input type="hidden" name="catalog_session_id" value="">
@@ -3108,7 +3113,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
 
 def layout(title, content, active="projects", message=""):
     nav = [
-        ("projects", "/", "Объекты"),
+        ("projects", "/admin", "Объекты"),
         ("new", "/project/new", "Добавить"),
         ("crm", "/crm", "CRM"),
         ("leads", "/leads", "Заявки"),
@@ -5387,6 +5392,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
             self.end_headers()
+        elif path == "/":
+            self.send_html(app_projects_page(query, base_path=""))
+        elif path == "/lot":
+            try:
+                project_id = int(query.get("id", ["0"])[0])
+            except ValueError:
+                project_id = 0
+            self.send_html(app_project_page(project_id, base_path=""))
         elif path == "/app":
             self.send_html(app_projects_page(query))
         elif path == "/app/lot":
@@ -5399,7 +5412,7 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_media(path.removeprefix("/media/"), include_body=True)
         elif not self.require_auth():
             return
-        elif path == "/":
+        elif path == "/admin":
             self.send_html(dashboard())
         elif path == "/projects/export.xlsx":
             filename = f"active_lots_{now_local().strftime('%Y-%m-%d')}.xlsx"
@@ -5486,14 +5499,14 @@ class Handler(BaseHTTPRequestHandler):
             password = form_value(form, "password")
             if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
                 self.send_response(303)
-                self.send_header("Location", "/")
+                self.send_header("Location", "/admin")
                 self.send_header("Set-Cookie", f"session={sign(username)}; Path=/; HttpOnly; SameSite=Lax")
                 self.end_headers()
             else:
                 self.send_html(login_page("Неверный логин или пароль"), status=401)
             return
 
-        if path == "/app/lead":
+        if path in ("/app/lead", "/lead"):
             form = parse_form(self)
             project_id = int(form_value(form, "project_id", "0") or 0)
             name = form_value(form, "name").strip()
@@ -5511,7 +5524,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(app_project_page(project_id, "Укажите телефон, WhatsApp или Telegram."), status=400)
                 return
             create_web_lead(project_id, name, contact, message, tg_user=tg_user, session_id=session_id)
-            self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами."))
+            base_path = "" if path == "/lead" else "/app"
+            self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами.", base_path=base_path))
             return
 
         if path == "/app/event":
@@ -5550,11 +5564,11 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_form(self)
             with db() as conn:
                 conn.execute("update projects set status='archived', updated_at=? where id=?", (iso_now(), form_value(form, "id")))
-            self.redirect("/")
+            self.redirect("/admin")
         elif path == "/project/delete":
             form = parse_form(self)
             delete_project(form_value(form, "id"))
-            self.redirect("/")
+            self.redirect("/admin")
         elif path == "/project/cover":
             form = parse_form(self)
             project_id = form_value(form, "id")
