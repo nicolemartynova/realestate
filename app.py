@@ -5632,6 +5632,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
             self.end_headers()
+        elif path.startswith("/yandex_") and path.endswith(".html") and "/" not in path.removeprefix("/"):
+            verification_file = APP_DIR / path.removeprefix("/")
+            if verification_file.exists():
+                self.send_html(verification_file.read_text(encoding="utf-8"))
+            else:
+                self.send_html("Not found", status=404)
         elif path == "/":
             self.send_html(app_projects_page(query, base_path=""))
         elif path == "/lot":
