@@ -46,10 +46,12 @@ PERF_LOG_ENABLED = os.environ.get("PERF_LOG_ENABLED", "1") != "0"
 PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "belowmarketdubaibot")
 YANDEX_METRIKA_ID = os.environ.get("YANDEX_METRIKA_ID", "112517412").strip()
+YANDEX_METRIKA_TOKEN = os.environ.get("YANDEX_METRIKA_TOKEN", "").strip()
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
 DAILY_SEND_SLOTS = [("morning", dt_time(11, 0)), ("evening", dt_time(17, 0))]
+METRIKA_DAILY_REPORT_TIME = dt_time(11, 0)
 CATALOG_FOLLOWUP_DELAY_MINUTES = 2
 CATALOG_CLOSE_FOLLOWUP_DELAY_SECONDS = 5
 CATALOG_STALE_SESSION_MINUTES = 5
@@ -61,6 +63,11 @@ LEAD_STATUSES = [
     ("offer", "Оффер / переговоры"),
     ("closed", "Сделка закрыта"),
     ("lost", "Неактуальна"),
+]
+METRIKA_GOALS = [
+    ("lot_view", "Просмотр лота"),
+    ("lot_share", "Поделиться лотом"),
+    ("lead_submit", "Хочу узнать подробнее"),
 ]
 LEAD_STATUS_LABELS = dict(LEAD_STATUSES)
 SUBSCRIBER_STATUSES = [
@@ -396,6 +403,11 @@ def init_db():
               created_at text not null,
               updated_at text not null,
               foreign key(status_id) references crm_statuses(id)
+            );
+
+            create table if not exists report_runs (
+              report_key text primary key,
+              sent_at text not null
             );
             """
         )
@@ -2367,6 +2379,171 @@ def process_crm_reminders(moment):
             )
 
 
+def metrika_api_get(path, params=None):
+    if not YANDEX_METRIKA_TOKEN:
+        raise RuntimeError("YANDEX_METRIKA_TOKEN is not configured")
+    query = urllib.parse.urlencode(params or {})
+    url = f"https://api-metrika.yandex.net{path}" + (f"?{query}" if query else "")
+    req = urllib.request.Request(url, headers={"Authorization": f"OAuth {YANDEX_METRIKA_TOKEN}"})
+    with urllib.request.urlopen(req, timeout=20) as response:
+        return json.loads(response.read().decode())
+
+
+def metrika_goal_ids():
+    data = metrika_api_get(f"/management/v1/counter/{YANDEX_METRIKA_ID}/goals")
+    result = {}
+    for goal in data.get("goals", []):
+        goal_id = goal.get("id")
+        goal_name = str(goal.get("name") or "")
+        conditions = goal.get("conditions") or []
+        condition_values = {str(item.get("url") or item.get("action") or "") for item in conditions}
+        for key, label in METRIKA_GOALS:
+            if goal_id and (key == goal_name or label == goal_name or key in condition_values):
+                result[key] = goal_id
+    return result
+
+
+def metrika_daily_summary(report_date):
+    metrics = ["ym:s:visits", "ym:s:users"]
+    goal_ids = {}
+    try:
+        goal_ids = metrika_goal_ids()
+    except Exception:
+        traceback.print_exc()
+    for key, _ in METRIKA_GOALS:
+        goal_id = goal_ids.get(key)
+        if goal_id:
+            metrics.append(f"ym:s:goal{goal_id}reaches")
+    data = metrika_api_get(
+        "/stat/v1/data",
+        {
+            "ids": YANDEX_METRIKA_ID,
+            "date1": report_date.isoformat(),
+            "date2": report_date.isoformat(),
+            "metrics": ",".join(metrics),
+            "accuracy": "full",
+        },
+    )
+    totals = data.get("totals") or []
+    summary = {
+        "visits": int(totals[0] or 0) if len(totals) > 0 else 0,
+        "users": int(totals[1] or 0) if len(totals) > 1 else 0,
+        "goals": {},
+        "missing_goals": [],
+    }
+    metric_index = 2
+    for key, label in METRIKA_GOALS:
+        if key in goal_ids:
+            summary["goals"][key] = int(totals[metric_index] or 0) if len(totals) > metric_index else 0
+            metric_index += 1
+        else:
+            summary["goals"][key] = None
+            summary["missing_goals"].append(label)
+    return summary
+
+
+def internal_lot_activity_summary(start_at, end_at):
+    with db() as conn:
+        views = conn.execute(
+            """
+            select p.id, p.title, count(*) c
+            from catalog_events ce
+            left join projects p on p.id = ce.project_id
+            where ce.event_type='catalog_lot_view' and ce.created_at >= ? and ce.created_at < ?
+            group by p.id, p.title
+            order by c desc
+            limit 5
+            """,
+            (start_at, end_at),
+        ).fetchall()
+        shares = conn.execute(
+            """
+            select p.id, p.title, count(*) c
+            from catalog_events ce
+            left join projects p on p.id = ce.project_id
+            where ce.event_type='catalog_share' and ce.created_at >= ? and ce.created_at < ?
+            group by p.id, p.title
+            order by c desc
+            limit 5
+            """,
+            (start_at, end_at),
+        ).fetchall()
+        leads = conn.execute(
+            """
+            select p.id, p.title, count(*) c
+            from web_leads wl
+            left join projects p on p.id = wl.project_id
+            where wl.created_at >= ? and wl.created_at < ?
+            group by p.id, p.title
+            order by c desc
+            limit 5
+            """,
+            (start_at, end_at),
+        ).fetchall()
+    return {"views": views, "shares": shares, "leads": leads}
+
+
+def format_lot_rows(rows):
+    if not rows:
+        return "нет"
+    parts = []
+    for row in rows:
+        title = row["title"] or "Лот удален"
+        lot_id = row["id"] or "?"
+        parts.append(f"• #{lot_id} {title}: {row['c']}")
+    return "\n".join(parts)
+
+
+def build_metrika_daily_report(report_date):
+    start_at = datetime.combine(report_date, dt_time(0, 0)).isoformat()
+    end_at = datetime.combine(report_date + timedelta(days=1), dt_time(0, 0)).isoformat()
+    metrika = metrika_daily_summary(report_date)
+    internal = internal_lot_activity_summary(start_at, end_at)
+    goal_lines = []
+    for key, label in METRIKA_GOALS:
+        value = metrika["goals"].get(key)
+        goal_lines.append(f"• {label}: {'не настроена в Метрике' if value is None else value}")
+    missing = ""
+    if metrika["missing_goals"]:
+        missing = "\n\n⚠️ В Метрике не найдены цели: " + ", ".join(metrika["missing_goals"])
+    return (
+        f"📊 Ежедневная сводка Below Market UAE\n"
+        f"Период: {report_date.strftime('%d.%m.%Y')} по Дубаю\n\n"
+        f"Метрика:\n"
+        f"• Визиты: {metrika['visits']}\n"
+        f"• Посетители: {metrika['users']}\n\n"
+        f"Цели:\n" + "\n".join(goal_lines) +
+        f"\n\nТоп просмотров лотов:\n{format_lot_rows(internal['views'])}\n\n"
+        f"Топ share лотов:\n{format_lot_rows(internal['shares'])}\n\n"
+        f"Топ заявок по лотам:\n{format_lot_rows(internal['leads'])}"
+        f"{missing}"
+    )
+
+
+def process_metrika_daily_report(moment):
+    if not YANDEX_METRIKA_TOKEN or not YANDEX_METRIKA_ID:
+        return
+    if moment.time() < METRIKA_DAILY_REPORT_TIME:
+        return
+    report_date = moment.date() - timedelta(days=1)
+    report_key = f"metrika_daily:{report_date.isoformat()}"
+    with db() as conn:
+        already_sent = conn.execute("select 1 from report_runs where report_key = ?", (report_key,)).fetchone()
+    if already_sent:
+        return
+    try:
+        text = build_metrika_daily_report(report_date)
+    except Exception:
+        traceback.print_exc()
+        return
+    notify_admin(text)
+    with db() as conn:
+        conn.execute(
+            "insert or replace into report_runs(report_key, sent_at) values (?, ?)",
+            (report_key, iso_now()),
+        )
+
+
 def in_send_window(moment):
     t = moment.time()
     return SEND_WINDOW_START <= t <= SEND_WINDOW_END
@@ -2403,6 +2580,7 @@ def scheduler_loop(stop_event):
             moment = now_local()
             process_crm_reminders(moment)
             process_catalog_followups(moment)
+            process_metrika_daily_report(moment)
             if in_send_window(moment):
                 with db() as conn:
                     pending = conn.execute(
