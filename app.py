@@ -45,6 +45,7 @@ TIMEZONE_OFFSET = int(os.environ.get("TIMEZONE_OFFSET", "4"))
 PERF_LOG_ENABLED = os.environ.get("PERF_LOG_ENABLED", "1") != "0"
 PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "belowmarketdubaibot")
+YANDEX_METRIKA_ID = os.environ.get("YANDEX_METRIKA_ID", "112517412").strip()
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
@@ -2628,7 +2629,34 @@ def build_active_projects_xlsx():
     return build_xlsx_package([("Актуальные лоты", rows)])
 
 
-def app_layout(title, content, message="", catalog_event="", project_id=None):
+def metrika_head():
+    if not YANDEX_METRIKA_ID:
+        return ""
+    counter_id = json.dumps(YANDEX_METRIKA_ID)
+    return f"""
+  <!-- Yandex.Metrika counter -->
+  <script>
+  (function(m,e,t,r,i,k,a){{m[i]=m[i]||function(){{(m[i].a=m[i].a||[]).push(arguments)}};m[i].l=1*new Date();
+    for (var j = 0; j < document.scripts.length; j++) {{if (document.scripts[j].src === r) {{ return; }}}}
+    k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
+  }})(window, document, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym');
+  ym({counter_id}, 'init', {{clickmap:true, trackLinks:true, accurateTrackBounce:true, webvisor:true}});
+  </script>
+  <noscript><div><img src="https://mc.yandex.ru/watch/{escape(YANDEX_METRIKA_ID)}" style="position:absolute; left:-9999px;" alt=""></div></noscript>
+  <!-- /Yandex.Metrika counter -->"""
+
+
+def app_layout(title, content, message="", catalog_event="", project_id=None, project=None):
+    metrika_project = {}
+    if project:
+        metrika_project = {
+            "lot_id": project["id"],
+            "title": project["title"],
+            "district": project["district"],
+            "building": project["building"],
+            "rooms": project["rooms"],
+            "price": project["price"],
+        }
     event_script = ""
     if catalog_event:
         event_key = f"{catalog_event}:{project_id or ''}"
@@ -2642,6 +2670,8 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
     var tg = window.Telegram && window.Telegram.WebApp;
     if (tg && tg.ready) tg.ready();
     var user = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
+    var metrikaCounterId = {json.dumps(YANDEX_METRIKA_ID)};
+    var metrikaProject = {json.dumps(metrika_project, ensure_ascii=False)};
     var sessionId = sessionStorage.getItem('catalog_session_id');
     if (!sessionId) {{
       sessionId = String(Date.now()) + '-' + Math.random().toString(16).slice(2);
@@ -2678,6 +2708,15 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
         keepalive: true
       }}).catch(function() {{}});
     }}
+    function metrikaGoal(goal, params) {{
+      if (!metrikaCounterId || typeof window.ym !== 'function') return;
+      try {{
+        window.ym(Number(metrikaCounterId), 'reachGoal', goal, params || {{}});
+      }} catch (e) {{}}
+    }}
+    if ({json.dumps(catalog_event)} === 'catalog_lot_view') {{
+      metrikaGoal('lot_view', metrikaProject);
+    }}
     if (!({once_guard})) {{
       sendEvent({json.dumps(catalog_event, ensure_ascii=False)}, false);
       {once_mark}
@@ -2692,7 +2731,7 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
       if (link) {{
         try {{
           var url = new URL(link.getAttribute('href'), window.location.origin);
-          if (url.origin === window.location.origin && url.pathname.indexOf('/app') === 0) {{
+          if (url.origin === window.location.origin && (url.pathname === '/' || url.pathname === '/lot' || url.pathname.indexOf('/app') === 0)) {{
             internalNavigation = true;
           }}
         }} catch (e) {{}}
@@ -2703,10 +2742,28 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
       if (form && form.action) {{
         try {{
           var url = new URL(form.action, window.location.origin);
-          if (url.origin === window.location.origin && url.pathname.indexOf('/app') === 0) {{
+          if (url.origin === window.location.origin && (url.pathname === '/lead' || url.pathname.indexOf('/app') === 0)) {{
             internalNavigation = true;
           }}
         }} catch (e) {{}}
+      }}
+      if (form && form.classList && form.classList.contains('lead-form')) {{
+        metrikaGoal('lead_submit', metrikaProject);
+      }}
+    }});
+    document.addEventListener('click', function(event) {{
+      var button = event.target && event.target.closest ? event.target.closest('[data-share-lot]') : null;
+      if (!button) return;
+      var shareUrl = button.getAttribute('data-share-url') || window.location.href;
+      var shareText = button.getAttribute('data-share-text') || document.title;
+      sendEvent('catalog_share', false);
+      metrikaGoal('lot_share', metrikaProject);
+      if (navigator.share) {{
+        navigator.share({{title: shareText, text: shareText, url: shareUrl}}).catch(function() {{}});
+      }} else if (tg && tg.openTelegramLink) {{
+        tg.openTelegramLink('https://t.me/share/url?' + new URLSearchParams({{url: shareUrl, text: shareText}}).toString());
+      }} else {{
+        window.open('https://t.me/share/url?' + new URLSearchParams({{url: shareUrl, text: shareText}}).toString(), '_blank', 'noopener');
       }}
     }});
     function closeCatalog() {{
@@ -2728,6 +2785,7 @@ def app_layout(title, content, message="", catalog_event="", project_id=None):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
+  {metrika_head()}
   <style>{APP_CSS}</style>
 </head>
 <body>
@@ -2881,6 +2939,9 @@ def app_project_page(project_id, message="", base_path="/app"):
         return app_projects_page(message="Лот не найден или больше не актуален.", base_path=base_path)
     root_path = base_path or "/"
     lead_path = f"{base_path}/lead" if base_path else "/lead"
+    lot_path = f"{base_path}/lot" if base_path else "/lot"
+    share_url = f"{PUBLIC_BASE_URL}{lot_path}?id={project['id']}" if PUBLIC_BASE_URL else f"{lot_path}?id={project['id']}"
+    share_text = f"Лот недвижимости в Дубае ниже рынка: {project['title']}"
     media = get_project_media(project_id)
     gallery_items = []
     for item in media:
@@ -2931,6 +2992,7 @@ def app_project_page(project_id, message="", base_path="/app"):
         <div class="detail-price">{money(project['price'])} AED</div>
         <div class="facts">{fact_html}</div>
         {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
+        <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ Поделиться лотом</button>
         <form class="lead-form" method="post" action="{escape(lead_path)}">
           <input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
@@ -2943,7 +3005,7 @@ def app_project_page(project_id, message="", base_path="/app"):
       </aside>
     </section>
     """
-    return app_layout(project["title"], content, message, catalog_event="catalog_lot_view", project_id=project["id"])
+    return app_layout(project["title"], content, message, catalog_event="catalog_lot_view", project_id=project["id"], project=project)
 
 
 def catalog_user_name(tg_user):
@@ -3019,7 +3081,7 @@ def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, 
 
 
 def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None):
-    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close"}:
+    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close", "catalog_share"}:
         return None
     project = get_project(project_id) if project_id else None
     chat_id = None
