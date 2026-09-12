@@ -47,6 +47,7 @@ PERF_SLOW_MS = int(os.environ.get("PERF_SLOW_MS", "800"))
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "belowmarketdubaibot")
 YANDEX_METRIKA_ID = os.environ.get("YANDEX_METRIKA_ID", "112517412").strip()
 YANDEX_METRIKA_TOKEN = os.environ.get("YANDEX_METRIKA_TOKEN", "").strip()
+GOOGLE_TAG_MANAGER_ID = os.environ.get("GOOGLE_TAG_MANAGER_ID", "GTM-WFTHTSHF").strip()
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
@@ -2824,6 +2825,32 @@ def metrika_head():
   <!-- /Yandex.Metrika counter -->"""
 
 
+def gtm_head():
+    if not GOOGLE_TAG_MANAGER_ID:
+        return ""
+    container_id = json.dumps(GOOGLE_TAG_MANAGER_ID)
+    return f"""
+  <!-- Google Tag Manager -->
+  <script>
+  (function(w,d,s,l,i){{w[l]=w[l]||[];w[l].push({{'gtm.start':new Date().getTime(),event:'gtm.js'}});
+    var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';
+    j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;
+    f.parentNode.insertBefore(j,f);
+  }})(window,document,'script','dataLayer',{container_id});
+  </script>
+  <!-- End Google Tag Manager -->"""
+
+
+def gtm_body():
+    if not GOOGLE_TAG_MANAGER_ID:
+        return ""
+    src = f"https://www.googletagmanager.com/ns.html?id={urllib.parse.quote(GOOGLE_TAG_MANAGER_ID)}"
+    return f"""
+  <!-- Google Tag Manager (noscript) -->
+  <noscript><iframe src="{escape(src)}" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+  <!-- End Google Tag Manager (noscript) -->"""
+
+
 def public_url(path="/"):
     if not PUBLIC_BASE_URL:
         return path
@@ -2996,10 +3023,12 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
   <meta property="og:description" content="{escape(description)}">
   <meta property="og:url" content="{escape(canonical_url)}">
   {og_image_tag}
+  {gtm_head()}
   {metrika_head()}
   <style>{APP_CSS}</style>
 </head>
 <body>
+  {gtm_body()}
   <main class="app-shell">
     {f'<div class="notice">{escape(message)}</div>' if message else ''}
     {content}
