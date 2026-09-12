@@ -2944,8 +2944,21 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
         window.ym(Number(metrikaCounterId), 'reachGoal', goal, params || {{}});
       }} catch (e) {{}}
     }}
+    function gtmEvent(eventName, params) {{
+      window.dataLayer = window.dataLayer || [];
+      var eventPayload = Object.assign({{
+        event: eventName,
+        page_path: window.location.pathname + window.location.search,
+        catalog_session_id: sessionId
+      }}, params || {{}});
+      window.dataLayer.push(eventPayload);
+    }}
+    function analyticsEvent(eventName, params) {{
+      metrikaGoal(eventName, params);
+      gtmEvent(eventName, params);
+    }}
     if ({json.dumps(catalog_event)} === 'catalog_lot_view') {{
-      metrikaGoal('lot_view', metrikaProject);
+      analyticsEvent('lot_view', metrikaProject);
     }}
     if (!({once_guard})) {{
       sendEvent({json.dumps(catalog_event, ensure_ascii=False)}, false);
@@ -2978,7 +2991,7 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
         }} catch (e) {{}}
       }}
       if (form && form.classList && form.classList.contains('lead-form')) {{
-        metrikaGoal('lead_submit', metrikaProject);
+        analyticsEvent('lead_submit', metrikaProject);
       }}
     }});
     document.addEventListener('click', function(event) {{
@@ -2987,7 +3000,7 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
       var shareUrl = button.getAttribute('data-share-url') || window.location.href;
       var shareText = button.getAttribute('data-share-text') || document.title;
       sendEvent('catalog_share', false);
-      metrikaGoal('lot_share', metrikaProject);
+      analyticsEvent('lot_share', metrikaProject);
       if (navigator.share) {{
         navigator.share({{title: shareText, text: shareText, url: shareUrl}}).catch(function() {{}});
       }} else if (tg && tg.openTelegramLink) {{
