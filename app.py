@@ -2824,7 +2824,29 @@ def metrika_head():
   <!-- /Yandex.Metrika counter -->"""
 
 
-def app_layout(title, content, message="", catalog_event="", project_id=None, project=None):
+def public_url(path="/"):
+    if not PUBLIC_BASE_URL:
+        return path
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{PUBLIC_BASE_URL}{path}"
+
+
+def seo_description_for_project(project):
+    parts = [
+        f"{project['rooms']} в {project['building']}, {project['district']}",
+        f"цена {money(project['price'])} AED",
+    ]
+    if project["market_price"]:
+        discount = pct_below(project["price"], project["market_price"])
+        if discount and discount > 0:
+            parts.append(f"ниже рынка на {discount}%")
+    if project["distress"]:
+        parts.append("distress deal")
+    return "Лот недвижимости в Дубае ниже рынка: " + ", ".join(parts) + ". Оставьте заявку, и @roi_counter свяжется с вами."
+
+
+def app_layout(title, content, message="", catalog_event="", project_id=None, project=None, description="", canonical_url="", og_image="", noindex=False):
     metrika_project = {}
     if project:
         metrika_project = {
@@ -2835,6 +2857,9 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
             "rooms": project["rooms"],
             "price": project["price"],
         }
+    description = description or "Актуальные лоты недвижимости в Дубае ниже рынка: distress deals, срочные продажи, квартиры и инвестиционные объекты Below Market UAE."
+    canonical_url = canonical_url or public_url("/")
+    og_image_tag = f'<meta property="og:image" content="{escape(og_image)}">' if og_image else ""
     event_script = ""
     if catalog_event:
         event_key = f"{catalog_event}:{project_id or ''}"
@@ -2962,7 +2987,15 @@ def app_layout(title, content, message="", catalog_event="", project_id=None, pr
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {('<meta name="robots" content="noindex, nofollow">' if noindex else '')}
   <title>{escape(title)}</title>
+  <meta name="description" content="{escape(description)}">
+  <link rel="canonical" href="{escape(canonical_url)}">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{escape(title)}">
+  <meta property="og:description" content="{escape(description)}">
+  <meta property="og:url" content="{escape(canonical_url)}">
+  {og_image_tag}
   {metrika_head()}
   <style>{APP_CSS}</style>
 </head>
@@ -3074,7 +3107,15 @@ def app_projects_page(query=None, message="", base_path="/app"):
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else '<div class="empty-state">По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор.</div>'}
     """
-    return app_layout("Below Market Dubai", content, message, catalog_event="catalog_open")
+    return app_layout(
+        "Недвижимость в Дубае ниже рынка | Below Market UAE",
+        content,
+        message,
+        catalog_event="catalog_open",
+        description="Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты.",
+        canonical_url=public_url("/"),
+        noindex=bool(base_path),
+    )
 
 
 def app_project_card(project, lot_path="/app/lot"):
@@ -3183,7 +3224,79 @@ def app_project_page(project_id, message="", base_path="/app"):
       </aside>
     </section>
     """
-    return app_layout(project["title"], content, message, catalog_event="catalog_lot_view", project_id=project["id"], project=project)
+    cover = project_cover(project["id"])
+    title = f"{project['title']} - недвижимость в Дубае ниже рынка | Below Market UAE"
+    return app_layout(
+        title,
+        content,
+        message,
+        catalog_event="catalog_lot_view",
+        project_id=project["id"],
+        project=project,
+        description=seo_description_for_project(project),
+        canonical_url=public_url(f"/lot?id={project['id']}"),
+        og_image=cover,
+        noindex=bool(base_path),
+    )
+
+
+def robots_txt():
+    sitemap_url = public_url("/sitemap.xml")
+    return "\n".join(
+        [
+            "User-agent: *",
+            "Allow: /$",
+            "Allow: /lot",
+            "Allow: /media/",
+            "Disallow: /app",
+            "Disallow: /login",
+            "Disallow: /logout",
+            "Disallow: /admin",
+            "Disallow: /project",
+            "Disallow: /projects",
+            "Disallow: /crm",
+            "Disallow: /leads",
+            "Disallow: /chats",
+            "Disallow: /stats",
+            "Disallow: /broadcasts",
+            "Disallow: /subscribers",
+            f"Sitemap: {sitemap_url}",
+            "",
+        ]
+    )
+
+
+def sitemap_xml():
+    with db() as conn:
+        projects = conn.execute(
+            """
+            select id, updated_at, created_at
+            from projects
+            where status='active'
+            order by updated_at desc, id desc
+            """
+        ).fetchall()
+    urls = [
+        (public_url("/"), now_local().date().isoformat(), "daily", "1.0"),
+    ]
+    for project in projects:
+        lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
+        urls.append((public_url(f"/lot?id={project['id']}"), lastmod, "daily", "0.8"))
+    items = "\n".join(
+        "  <url>\n"
+        f"    <loc>{html.escape(loc)}</loc>\n"
+        f"    <lastmod>{html.escape(lastmod)}</lastmod>\n"
+        f"    <changefreq>{changefreq}</changefreq>\n"
+        f"    <priority>{priority}</priority>\n"
+        "  </url>"
+        for loc, lastmod, changefreq, priority in urls
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{items}\n"
+        "</urlset>\n"
+    )
 
 
 def catalog_user_name(tg_user):
@@ -3372,6 +3485,7 @@ def layout(title, content, active="projects", message=""):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
   <title>{escape(title)}</title>
   <style>{CSS}</style>
 </head>
@@ -5460,7 +5574,7 @@ def chats_page(chat_id="", message="", search=""):
 
 
 def login_page(message=""):
-    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход</title><style>{CSS}</style></head>
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>Вход</title><style>{CSS}</style></head>
 <body class="login"><form method="post" action="/login"><h1>Realty Bot</h1>{f'<div class="notice">{escape(message)}</div>' if message else ''}<label>Логин<input name="username" autocomplete="username"></label><label>Пароль<input name="password" type="password" autocomplete="current-password"></label><button>Войти</button></form></body></html>"""
 
 
@@ -5595,6 +5709,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def send_text(self, body, content_type="text/plain; charset=utf-8", status=200):
+        encoded = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def send_bytes(self, data, content_type, filename):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -5627,6 +5749,10 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         if path == "/login":
             self.send_html(login_page())
+        elif path == "/robots.txt":
+            self.send_text(robots_txt())
+        elif path == "/sitemap.xml":
+            self.send_text(sitemap_xml(), "application/xml; charset=utf-8")
         elif path == "/logout":
             self.send_response(303)
             self.send_header("Location", "/login")
