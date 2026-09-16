@@ -2859,6 +2859,13 @@ def public_url(path="/"):
     return f"{PUBLIC_BASE_URL}{path}"
 
 
+def preferred_public_language(accept_language):
+    value = (accept_language or "").lower()
+    if "ru" in value:
+        return "ru"
+    return "en"
+
+
 def seo_description_for_project(project):
     parts = [
         f"{project['rooms']} в {project['building']}, {project['district']}",
@@ -2885,6 +2892,8 @@ def app_layout(
     og_image="",
     noindex=False,
     structured_data=None,
+    lang="ru",
+    alternate_urls=None,
 ):
     metrika_project = {}
     if project:
@@ -2899,6 +2908,11 @@ def app_layout(
     description = description or "Актуальные лоты недвижимости в Дубае ниже рынка: distress deals, срочные продажи, квартиры и инвестиционные объекты Below Market UAE."
     canonical_url = canonical_url or public_url("/")
     og_image_tag = f'<meta property="og:image" content="{escape(og_image)}">' if og_image else ""
+    alternate_urls = alternate_urls or {}
+    alternate_tags = "\n".join(
+        f'  <link rel="alternate" hreflang="{escape(code)}" href="{escape(url)}">'
+        for code, url in alternate_urls.items()
+    )
     structured_data_html = ""
     if structured_data:
         structured_json = json.dumps(structured_data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
@@ -3039,7 +3053,7 @@ def app_layout(
   }})();
   </script>"""
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{escape(lang)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3047,6 +3061,7 @@ def app_layout(
   <title>{escape(title)}</title>
   <meta name="description" content="{escape(description)}">
   <link rel="canonical" href="{escape(canonical_url)}">
+  {alternate_tags}
   <meta property="og:type" content="website">
   <meta property="og:title" content="{escape(title)}">
   <meta property="og:description" content="{escape(description)}">
@@ -3300,6 +3315,14 @@ def app_project_page(project_id, message="", base_path="/app"):
     )
 
 
+def below_market_alternates():
+    return {
+        "ru": public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"),
+        "en": public_url("/en/below-market-property-dubai"),
+        "x-default": public_url("/below-market-property-dubai"),
+    }
+
+
 def below_market_ru_page():
     url = public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka")
     title = "Недвижимость в Дубае ниже рынка: below market и distress deals | Below Market UAE"
@@ -3418,9 +3441,16 @@ def below_market_ru_page():
             ],
         },
     ]
+    alternates = below_market_alternates()
     content = f"""
     <article class="seo-page">
-      <nav class="breadcrumbs"><a href="/">Каталог</a><span>/</span><span>Недвижимость в Дубае ниже рынка</span></nav>
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/">Каталог</a><span>/</span><span>Недвижимость в Дубае ниже рынка</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          <span>RU</span>
+          <a href="{escape(alternates['en'])}">EN</a>
+        </div>
+      </div>
       <section class="seo-hero">
         <div class="app-brand">Below Market UAE</div>
         <h1>Недвижимость в Дубае ниже рынка: как находить реальные below-market deals</h1>
@@ -3525,6 +3555,245 @@ def below_market_ru_page():
         description=description,
         canonical_url=url,
         structured_data=structured_data,
+        lang="ru",
+        alternate_urls=alternates,
+    )
+
+
+def below_market_en_page():
+    url = public_url("/en/below-market-property-dubai")
+    title = "Below Market Property in Dubai: Distress Deals and Off-Market Opportunities | Below Market UAE"
+    description = (
+        "How to find below-market property in Dubai: distress deals, urgent sales, below original price lots, "
+        "price checks, key areas, risks, and broker-led property selection."
+    )
+    faq = [
+        (
+            "What does below-market property in Dubai mean?",
+            "A below-market property is priced below comparable listings and transaction benchmarks for a similar area, building, size, layout, condition, and status. The reason can be an urgent sale, a below original price assignment, a distress deal, or a seller who is motivated to close quickly.",
+        ),
+        (
+            "What is the difference between below market and a distress deal?",
+            "Below market means the price is below the current market reference. A distress deal usually involves urgency, financial pressure, or a seller who needs to exit quickly. Not every below-market lot is a distress deal, and not every distress deal is automatically a good investment.",
+        ),
+        (
+            "How can I check if a Dubai property is really below market?",
+            "You need to compare the property with close alternatives: district, building, view, floor, size, condition, rental status, handover timing, and actual transactions. Below Market UAE highlights market price, the percentage below market, distress status, and original price where this information is available.",
+        ),
+        (
+            "Which Dubai areas can have below-market property opportunities?",
+            "Below-market opportunities can appear in Business Bay, Dubai Marina, JVC, Sobha Hartland, Palm Jumeirah, Dubai Hills, Maritime City, Downtown Dubai, and other districts. The deal quality depends not only on the area, but also on the seller, building, entry price, and current liquidity.",
+        ),
+        (
+            "Can I buy a property below original price in Dubai?",
+            "Yes. Assignments and urgent resales can sometimes be offered below original price, especially when the seller needs to exit fast. These deals require checking the contract, payment plan, developer status, transfer rules, fees, and resale conditions.",
+        ),
+        (
+            "Who helps buyers with Below Market UAE property selection?",
+            "Property selection is handled by Aleksandr Vinogradov, a licensed real estate broker in Dubai, broker number 88673, Blackberry Real Estate L.L.C. He helps buyers assess a lot, compare it with the market, clarify details, and contact the seller side.",
+        ),
+    ]
+    faq_items = "".join(
+        f"""
+        <details>
+          <summary>{escape(question)}</summary>
+          <p>{escape(answer)}</p>
+        </details>
+        """
+        for question, answer in faq
+    )
+    structured_data = [
+        {
+            "@context": "https://schema.org",
+            "@type": "RealEstateAgent",
+            "@id": public_url("/#realestateagent"),
+            "name": "Below Market UAE",
+            "url": public_url("/"),
+            "areaServed": {"@type": "Place", "name": "Dubai, United Arab Emirates"},
+            "description": description,
+            "telephone": "+971503611218",
+            "employee": {
+                "@type": "Person",
+                "name": "Aleksandr Vinogradov",
+                "alternateName": "Александр Виноградов",
+                "jobTitle": "Licensed Real Estate Broker in Dubai",
+                "identifier": "Broker number 88673",
+                "hasCredential": {
+                    "@type": "EducationalOccupationalCredential",
+                    "credentialCategory": "Real Estate Broker License",
+                    "identifier": "88673",
+                    "validFrom": "2025-09-24",
+                    "validThrough": "2026-09-24",
+                },
+                "worksFor": {
+                    "@type": "RealEstateAgent",
+                    "name": "Blackberry Real Estate L.L.C",
+                },
+                "url": "https://t.me/roi_counter",
+            },
+            "sameAs": [
+                f"https://t.me/{BOT_USERNAME}",
+                "https://t.me/roi_counter",
+            ],
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "WebPage",
+            "@id": url,
+            "url": url,
+            "name": title,
+            "inLanguage": "en",
+            "description": description,
+            "isPartOf": {
+                "@type": "WebSite",
+                "@id": public_url("/#website"),
+                "name": "Below Market UAE",
+                "url": public_url("/"),
+            },
+            "about": [
+                {"@type": "Thing", "name": "below market property Dubai"},
+                {"@type": "Thing", "name": "distress deals Dubai"},
+                {"@type": "Thing", "name": "urgent property sale Dubai"},
+                {"@type": "Thing", "name": "Dubai real estate below original price"},
+            ],
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url("/")},
+                {"@type": "ListItem", "position": 2, "name": "Below Market Property in Dubai", "item": url},
+            ],
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": question,
+                    "acceptedAnswer": {"@type": "Answer", "text": answer},
+                }
+                for question, answer in faq
+            ],
+        },
+    ]
+    alternates = below_market_alternates()
+    content = f"""
+    <article class="seo-page">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/">Catalog</a><span>/</span><span>Below Market Property in Dubai</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          <a href="{escape(alternates['ru'])}">RU</a>
+          <span>EN</span>
+        </div>
+      </div>
+      <section class="seo-hero">
+        <div class="app-brand">Below Market UAE</div>
+        <h1>Below-market property in Dubai: how to find real distress deals</h1>
+        <p>Below Market UAE helps buyers and investors find apartments, villas, and off-plan assignments in Dubai that are offered below current market levels: distress deals, urgent sales, below original price lots, and opportunities with a clear price advantage.</p>
+        <div class="seo-actions">
+          <a class="app-button" href="/">View current listings</a>
+          <a class="app-button secondary" href="https://t.me/{escape(BOT_USERNAME)}">Open Telegram bot</a>
+        </div>
+      </section>
+
+      <section class="seo-grid">
+        <div class="seo-card"><strong>Below market</strong><span>We look beyond the listing price and compare the property with relevant alternatives, area, building, size, and liquidity.</span></div>
+        <div class="seo-card"><strong>Distress deals</strong><span>We mark urgent sales and special seller situations where a fast transaction can matter more than the highest possible price.</span></div>
+        <div class="seo-card"><strong>Broker-led checks</strong><span>Aleksandr Vinogradov, a licensed real estate broker in Dubai, helps clarify deal details, risks, and next steps.</span></div>
+      </section>
+
+      <section class="seo-section">
+        <h2>What is below-market property in Dubai?</h2>
+        <p>Below-market property in Dubai is a real estate lot offered below comparable listings and transaction benchmarks for similar properties. A fair comparison should consider the district, exact building, view, floor, size, layout, condition, rental status, handover timing, service charges, and seller motivation.</p>
+        <p>In practice, below-market property can appear when a seller needs to close quickly, an investor exits an off-plan project, a unit is offered below original price, a cash buyer can negotiate a discount, or the market has not fully repriced a specific asset yet.</p>
+      </section>
+
+      <section class="seo-section">
+        <h2>Below market, distress deal, and below original price</h2>
+        <div class="seo-table">
+          <div><strong>Below market</strong><span>The price is below the current market reference for comparable properties.</span></div>
+          <div><strong>Distress deal</strong><span>An urgent sale or special seller situation where speed can matter more than maximizing the price.</span></div>
+          <div><strong>Below original price</strong><span>The unit is offered below its initial purchase price or developer price, often in off-plan assignments or urgent resales.</span></div>
+        </div>
+        <p>The main mistake is treating every discount as a good deal. A property can be cheaper because of weak liquidity, an inefficient layout, high service charges, or an inflated original price. Below Market UAE presents lots in a format that helps buyers see both the price and the context.</p>
+      </section>
+
+      <section class="seo-section">
+        <h2>How we assess whether a lot is really below market</h2>
+        <ul class="seo-list">
+          <li>We compare the property with similar alternatives by district, building, size, room count, and status.</li>
+          <li>We use market price references and calculate the percentage below market when there is enough context.</li>
+          <li>We separately mark distress status and original price when this information is available and relevant.</li>
+          <li>We check whether the discount may hide risks: rental status, handover timing, payment plan, property condition, or fees.</li>
+          <li>We connect the buyer with a broker consultation to clarify documents, conditions, and the real feasibility of the deal.</li>
+        </ul>
+      </section>
+
+      <section class="seo-section">
+        <h2>Where to look for below-market property in Dubai</h2>
+        <p>Below-market deals can appear across different segments: apartments in Business Bay and Dubai Marina, investment studios in JVC and Arjan, family units in Dubai Hills, lots in Sobha Hartland, premium apartments and villas on Palm Jumeirah, and new projects in Maritime City and Rashid Yachts and Marina.</p>
+        <p>The exact building matters as much as the district. Liquidity, service charges, view, management quality, and rental demand can vary significantly inside the same area.</p>
+      </section>
+
+      <section class="seo-section">
+        <h2>Who Below Market UAE is for</h2>
+        <div class="seo-columns">
+          <div>
+            <h3>Investors</h3>
+            <p>For buyers who want a discounted entry price, resale potential, or yield above the average market level.</p>
+          </div>
+          <div>
+            <h3>End buyers</h3>
+            <p>For people who want to buy a Dubai apartment or villa below comparable alternatives without manually checking dozens of listings.</p>
+          </div>
+          <div>
+            <h3>Agents and partners</h3>
+            <p>For professionals who need quick access to curated below-market lots and a direct way to clarify details.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="seo-section">
+        <h2>Why work with a licensed real estate broker?</h2>
+        <p>Below-market deals require speed, but speed should not replace due diligence. A licensed broker can help check documents, property status, seller conditions, commissions, rental status, payment plan, and whether the discount is realistic.</p>
+        <div class="broker-card">
+          <h3>Below Market UAE broker</h3>
+          <dl>
+            <div><dt>Name</dt><dd>Aleksandr Vinogradov / Александр Виноградов</dd></div>
+            <div><dt>Status</dt><dd>Licensed Real Estate Broker in Dubai</dd></div>
+            <div><dt>Broker number</dt><dd>88673</dd></div>
+            <div><dt>Agency</dt><dd>Blackberry Real Estate L.L.C</dd></div>
+            <div><dt>License</dt><dd>issued 24-09-2025, valid until 24-09-2026</dd></div>
+            <div><dt>Contact</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a>, <a href="tel:+971503611218">+971503611218</a></dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="seo-section">
+        <h2>Frequently asked questions</h2>
+        <div class="faq-list">{faq_items}</div>
+      </section>
+
+      <section class="seo-cta">
+        <h2>Want to receive current below-market lots?</h2>
+        <p>Open the Below Market UAE catalog or Telegram bot. You can view lots, filter by area and room count, share properties, and request a personal selection.</p>
+        <div class="seo-actions">
+          <a class="app-button" href="/">Open catalog</a>
+          <a class="app-button secondary" href="https://t.me/{escape(BOT_USERNAME)}">Open bot</a>
+        </div>
+      </section>
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        description=description,
+        canonical_url=url,
+        structured_data=structured_data,
+        lang="en",
+        alternate_urls=alternates,
     )
 
 
@@ -3548,6 +3817,7 @@ def robots_txt():
     public_paths = [
         "Allow: /$",
         "Allow: /ru/",
+        "Allow: /en/",
         "Allow: /lot",
         "Allow: /llms.txt",
         "Allow: /media/",
@@ -3629,6 +3899,7 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 
 - [Homepage and public catalog]({public_url('/')})
 - [Russian guide: недвижимость в Дубае ниже рынка]({public_url('/ru/nedvizhimost-v-dubae-nizhe-rynka')})
+- [English guide: below-market property in Dubai]({public_url('/en/below-market-property-dubai')})
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
@@ -3655,6 +3926,7 @@ def sitemap_xml():
     urls = [
         (public_url("/"), now_local().date().isoformat(), "daily", "1.0"),
         (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), now_local().date().isoformat(), "weekly", "0.9"),
+        (public_url("/en/below-market-property-dubai"), now_local().date().isoformat(), "weekly", "0.9"),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
@@ -4033,8 +4305,13 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .notice { background:#fff7e8; border:1px solid #ead6b5; color:#614111; padding:12px 14px; border-radius:8px; margin-bottom:16px; }
 .muted { color:var(--muted); }
 .seo-page { display:grid; gap:22px; padding-bottom:24px; }
+.seo-topbar { display:flex; justify-content:space-between; gap:14px; align-items:center; }
 .breadcrumbs { display:flex; gap:8px; align-items:center; color:var(--muted); font-size:13px; font-weight:750; }
 .breadcrumbs a { color:var(--accent); text-decoration:none; }
+.language-switch { display:inline-flex; align-items:center; gap:4px; padding:4px; border:1px solid var(--line); border-radius:999px; background:#fff; font-size:13px; font-weight:850; }
+.language-switch a, .language-switch span { min-width:34px; padding:6px 9px; border-radius:999px; text-align:center; text-decoration:none; }
+.language-switch span { background:var(--accent); color:#fff; }
+.language-switch a { color:var(--muted); }
 .seo-hero { padding:26px 0 12px; display:grid; gap:12px; max-width:920px; }
 .seo-hero h1 { margin:0; font-size:clamp(32px,5vw,56px); line-height:1.03; max-width:900px; }
 .seo-hero p { margin:0; color:var(--muted); font-size:18px; max-width:830px; }
@@ -4065,7 +4342,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .seo-cta { display:grid; gap:10px; background:#e7f2ec; border-color:#bcd8c9; }
 @media (max-width:900px) { .app-shell { padding:14px 12px 36px; } .app-filters { position:static; grid-template-columns:1fr 1fr; } .app-filters input:first-child { grid-column:1 / -1; } .lot-grid { grid-template-columns:1fr; } .lot-detail { grid-template-columns:1fr; } .detail-panel { position:static; } }
 @media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } }
-@media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } }
+@media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
 """
 
 
@@ -6185,6 +6462,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(app_project_page(project_id, base_path=""))
         elif path == "/ru/nedvizhimost-v-dubae-nizhe-rynka":
             self.send_html(below_market_ru_page())
+        elif path == "/en/below-market-property-dubai":
+            self.send_html(below_market_en_page())
+        elif path == "/below-market-property-dubai":
+            if preferred_public_language(self.headers.get("Accept-Language")) == "ru":
+                self.redirect("/ru/nedvizhimost-v-dubae-nizhe-rynka")
+            else:
+                self.redirect("/en/below-market-property-dubai")
         elif path == "/app":
             self.send_html(app_projects_page(query))
         elif path == "/app/lot":
