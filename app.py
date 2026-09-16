@@ -3164,7 +3164,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     )
     is_public_catalog = base_path in ("", "/ru", "/en")
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
-    lot_path = "/lot" if is_public_catalog else f"{base_path}/lot"
+    lot_path = f"{base_path}/lot" if base_path in ("/ru", "/en", "/app") else "/lot"
     cards = "".join(app_project_card(project, lot_path, lang=lang) for project in projects)
     guide_path = "/en/below-market-property-dubai" if lang == "en" else "/ru/nedvizhimost-v-dubae-nizhe-rynka"
     alternates = catalog_alternates() if is_public_catalog else {}
@@ -3230,7 +3230,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
 
 def app_project_card(project, lot_path="/app/lot", lang="ru"):
     cover = project_cover(project["id"])
-    deal_tags = app_deal_tags(project)
+    deal_tags = app_deal_tags(project, lang=lang)
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
     return f"""
@@ -3250,28 +3250,37 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
     """
 
 
-def app_deal_tags(project):
+def app_deal_tags(project, lang="ru"):
     tags = []
     market_discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
     original_discount = pct_below(project["price"], project["original_price"]) if project["original_price"] else None
     if market_discount and market_discount > 0:
-        tags.append((f"Ниже рынка на {market_discount}%", "deal-tag"))
+        label = f"{market_discount}% below market" if lang == "en" else f"Ниже рынка на {market_discount}%"
+        tags.append((label, "deal-tag"))
     elif project["distress"] and original_discount and original_discount > 0:
-        tags.append((f"Ниже original price на {original_discount}%", "deal-tag"))
+        label = f"{original_discount}% below original price" if lang == "en" else f"Ниже original price на {original_discount}%"
+        tags.append((label, "deal-tag"))
     if project["distress"]:
-        tags.append(("Дистресс", "distress-tag"))
+        tags.append(("Distress" if lang == "en" else "Дистресс", "distress-tag"))
     return tags
 
 
-def app_project_page(project_id, message="", base_path="/app"):
+def app_project_page(project_id, message="", base_path="/app", lang="ru"):
+    lang = "en" if lang == "en" else "ru"
     project = get_project(project_id)
     if not project or project["status"] != "active":
-        return app_projects_page(message="Лот не найден или больше не актуален.", base_path=base_path)
-    root_path = base_path or "/"
-    lead_path = f"{base_path}/lead" if base_path else "/lead"
-    lot_path = f"{base_path}/lot" if base_path else "/lot"
+        fallback_message = "Lot not found or no longer active." if lang == "en" else "Лот не найден или больше не актуален."
+        return app_projects_page(message=fallback_message, base_path=base_path, lang=lang)
+    is_public_catalog = base_path in ("", "/ru", "/en")
+    root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
+    lead_path = f"{base_path}/lead" if base_path in ("/ru", "/en", "/app") else "/lead"
+    lot_path = f"{base_path}/lot" if base_path in ("/ru", "/en", "/app") else "/lot"
     share_url = f"{PUBLIC_BASE_URL}{lot_path}?id={project['id']}" if PUBLIC_BASE_URL else f"{lot_path}?id={project['id']}"
-    share_text = f"Лот недвижимости в Дубае ниже рынка: {project['title']}"
+    share_text = (
+        f"Below-market Dubai property lot: {project['title']}"
+        if lang == "en"
+        else f"Лот недвижимости в Дубае ниже рынка: {project['title']}"
+    )
     media = get_project_media(project_id)
     gallery_items = []
     for item in media:
@@ -3280,18 +3289,36 @@ def app_project_page(project_id, message="", base_path="/app"):
             gallery_items.append(f'<div class="gallery-item"><video src="{escape(src)}" controls playsinline></video></div>')
         else:
             gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt=""></div>')
+    labels = {
+        "category": "Category" if lang == "en" else "Категория",
+        "district": "Area" if lang == "en" else "Район",
+        "building": "Building" if lang == "en" else "Здание",
+        "rooms": "Bedrooms" if lang == "en" else "Комнаты",
+        "bathrooms": "Bathrooms" if lang == "en" else "Санузлы",
+        "floor": "Floor" if lang == "en" else "Этаж",
+        "parking": "Parking" if lang == "en" else "Парковка",
+        "status": "Availability" if lang == "en" else "Статус",
+        "furnishing": "Furnishing" if lang == "en" else "Меблировка",
+        "balcony": "Balcony" if lang == "en" else "Балкон",
+        "area": "Area" if lang == "en" else "Площадь",
+        "market_price": "Average market price" if lang == "en" else "Средняя цена рынка",
+        "below_market": "Below market" if lang == "en" else "Ниже рынка",
+        "distress": "Distress" if lang == "en" else "Дистресс",
+        "special_offer": "Yes, special offer" if lang == "en" else "Да, специальное предложение",
+        "below_original": "Below original price" if lang == "en" else "Ниже original price",
+    }
     facts = [
-        ("Категория", project["category"]),
-        ("Район", project["district"]),
-        ("Здание", project["building"]),
-        ("Комнаты", project["rooms"]),
-        ("Санузлы", project["bathrooms"]),
-        ("Этаж", project["floor_level"]),
-        ("Парковка", project["parking"]),
-        ("Статус", project["availability"]),
-        ("Меблировка", project["furnishing"]),
-        ("Балкон", project["balcony"]),
-        ("Площадь", project["area"]),
+        (labels["category"], project["category"]),
+        (labels["district"], project["district"]),
+        (labels["building"], project["building"]),
+        (labels["rooms"], project["rooms"]),
+        (labels["bathrooms"], project["bathrooms"]),
+        (labels["floor"], project["floor_level"]),
+        (labels["parking"], project["parking"]),
+        (labels["status"], project["availability"]),
+        (labels["furnishing"], project["furnishing"]),
+        (labels["balcony"], project["balcony"]),
+        (labels["area"], project["area"]),
     ]
     fact_html = "".join(
         f'<div class="fact"><small>{escape(label)}</small>{escape(value)}</div>'
@@ -3300,43 +3327,70 @@ def app_project_page(project_id, message="", base_path="/app"):
     )
     if project["market_price"]:
         discount = pct_below(project["price"], project["market_price"])
-        fact_html += f'<div class="fact"><small>Средняя цена рынка</small>{money(project["market_price"])} AED</div>'
+        fact_html += f'<div class="fact"><small>{escape(labels["market_price"])}</small>{money(project["market_price"])} AED</div>'
         if discount and discount > 0:
-            fact_html += f'<div class="fact deal-tag"><small>Ниже рынка</small>на {discount}%</div>'
+            value = f"{discount}% below" if lang == "en" else f"на {discount}%"
+            fact_html += f'<div class="fact deal-tag"><small>{escape(labels["below_market"])}</small>{escape(value)}</div>'
     if project["distress"]:
-        fact_html += '<div class="fact distress-tag"><small>Дистресс</small>Да, специальное предложение</div>'
+        fact_html += f'<div class="fact distress-tag"><small>{escape(labels["distress"])}</small>{escape(labels["special_offer"])}</div>'
         if project["original_price"]:
             original_discount = pct_below(project["price"], project["original_price"])
             fact_html += f'<div class="fact"><small>Original price</small>{money(project["original_price"])} AED</div>'
             if original_discount and original_discount > 0:
-                fact_html += f'<div class="fact deal-tag"><small>Ниже original price</small>на {original_discount}%</div>'
+                value = f"{original_discount}% below" if lang == "en" else f"на {original_discount}%"
+                fact_html += f'<div class="fact deal-tag"><small>{escape(labels["below_original"])}</small>{escape(value)}</div>'
+    back_label = "All lots" if lang == "en" else "Все лоты"
+    photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
+    share_label = "Share lot" if lang == "en" else "Поделиться лотом"
+    name_placeholder = "Your name" if lang == "en" else "Ваше имя"
+    contact_placeholder = "Phone, WhatsApp, or Telegram" if lang == "en" else "Телефон, WhatsApp или Telegram"
+    comment_placeholder = "Comment" if lang == "en" else "Комментарий"
+    details_label = "I want more details" if lang == "en" else "Хочу узнать подробнее"
+    lot_label = "Lot" if lang == "en" else "Лот"
+    language_switch = ""
+    alternates = {}
+    if is_public_catalog:
+        alternates = lot_alternates(project["id"])
+        language_switch = f"""
+        <div class="seo-topbar"><nav class="breadcrumbs"><a href="{escape(root_path)}">Below Market UAE</a></nav>
+          <div class="language-switch" aria-label="Language switch">
+            {f'<span>RU</span><a href="/en/lot?id={project["id"]}">EN</a>' if lang == 'ru' else f'<a href="/ru/lot?id={project["id"]}">RU</a><span>EN</span>'}
+          </div>
+        </div>
+        """
     content = f"""
-    <a class="back-link" href="{escape(root_path)}">← Все лоты</a>
+    {language_switch}
+    <a class="back-link" href="{escape(root_path)}">← {escape(back_label)}</a>
     <section class="lot-detail">
-      <div class="gallery">{''.join(gallery_items) or '<div class="gallery-item">Фото скоро появятся</div>'}</div>
+      <div class="gallery">{''.join(gallery_items) or f'<div class="gallery-item">{escape(photo_placeholder)}</div>'}</div>
       <aside class="detail-panel">
         <div>
-          <div class="app-brand">Лот #{project['id']}</div>
+          <div class="app-brand">{escape(lot_label)} #{project['id']}</div>
           <h1>{escape(project['title'])}</h1>
         </div>
         <div class="detail-price">{money(project['price'])} AED</div>
         <div class="facts">{fact_html}</div>
         {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
-        <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ Поделиться лотом</button>
+        <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ {escape(share_label)}</button>
         <form class="lead-form" method="post" action="{escape(lead_path)}">
           <input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
           <input type="hidden" name="catalog_session_id" value="">
-          <input name="name" placeholder="Ваше имя">
-          <input name="contact" required placeholder="Телефон, WhatsApp или Telegram">
-          <textarea name="message" placeholder="Комментарий"></textarea>
-          <button>💬 Хочу узнать подробнее</button>
+          <input name="name" placeholder="{escape(name_placeholder)}">
+          <input name="contact" required placeholder="{escape(contact_placeholder)}">
+          <textarea name="message" placeholder="{escape(comment_placeholder)}"></textarea>
+          <button>💬 {escape(details_label)}</button>
         </form>
       </aside>
     </section>
     """
     cover = project_cover(project["id"])
-    title = f"{project['title']} - недвижимость в Дубае ниже рынка | Below Market UAE"
+    title = (
+        f"{project['title']} - below-market property in Dubai | Below Market UAE"
+        if lang == "en"
+        else f"{project['title']} - недвижимость в Дубае ниже рынка | Below Market UAE"
+    )
+    canonical_path = f"{base_path}/lot?id={project['id']}" if base_path in ("/ru", "/en") else f"/lot?id={project['id']}"
     return app_layout(
         title,
         content,
@@ -3345,9 +3399,11 @@ def app_project_page(project_id, message="", base_path="/app"):
         project_id=project["id"],
         project=project,
         description=seo_description_for_project(project),
-        canonical_url=public_url(f"/lot?id={project['id']}"),
+        canonical_url=public_url(canonical_path),
         og_image=cover,
-        noindex=bool(base_path),
+        noindex=not is_public_catalog,
+        lang=lang,
+        alternate_urls=alternates,
     )
 
 
@@ -3364,6 +3420,14 @@ def catalog_alternates():
         "ru": public_url("/ru/"),
         "en": public_url("/en/"),
         "x-default": public_url("/"),
+    }
+
+
+def lot_alternates(project_id):
+    return {
+        "ru": public_url(f"/ru/lot?id={project_id}"),
+        "en": public_url(f"/en/lot?id={project_id}"),
+        "x-default": public_url(f"/lot?id={project_id}"),
     }
 
 
@@ -3908,8 +3972,9 @@ def llms_txt():
             details.append(f"{discount}% below market")
         if project["distress"]:
             details.append("distress deal")
-        lot_url = public_url(f"/lot?id={project['id']}")
-        lot_links.append(f"- [{project['title']}]({lot_url}) - " + ", ".join(str(item) for item in details if item))
+        ru_lot_url = public_url(f"/ru/lot?id={project['id']}")
+        en_lot_url = public_url(f"/en/lot?id={project['id']}")
+        lot_links.append(f"- [{project['title']} RU]({ru_lot_url}) / [EN]({en_lot_url}) - " + ", ".join(str(item) for item in details if item))
     lots_section = "\n".join(lot_links) if lot_links else "- Active listings are updated regularly."
 
     return f"""# Below Market UAE
@@ -3977,7 +4042,8 @@ def sitemap_xml():
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
-        urls.append((public_url(f"/lot?id={project['id']}"), lastmod, "daily", "0.8"))
+        urls.append((public_url(f"/ru/lot?id={project['id']}"), lastmod, "daily", "0.8"))
+        urls.append((public_url(f"/en/lot?id={project['id']}"), lastmod, "daily", "0.8"))
     items = "\n".join(
         "  <url>\n"
         f"    <loc>{html.escape(loc)}</loc>\n"
@@ -6511,11 +6577,20 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/en/":
             self.send_html(app_projects_page(query, base_path="/en", lang="en"))
         elif path == "/lot":
+            target_prefix = "/ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "/en"
+            self.redirect(f"{target_prefix}/lot" + (f"?{parsed.query}" if parsed.query else ""))
+        elif path == "/ru/lot":
             try:
                 project_id = int(query.get("id", ["0"])[0])
             except ValueError:
                 project_id = 0
-            self.send_html(app_project_page(project_id, base_path=""))
+            self.send_html(app_project_page(project_id, base_path="/ru", lang="ru"))
+        elif path == "/en/lot":
+            try:
+                project_id = int(query.get("id", ["0"])[0])
+            except ValueError:
+                project_id = 0
+            self.send_html(app_project_page(project_id, base_path="/en", lang="en"))
         elif path == "/ru/nedvizhimost-v-dubae-nizhe-rynka":
             self.send_html(below_market_ru_page())
         elif path == "/en/below-market-property-dubai":
@@ -6631,7 +6706,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(login_page("Неверный логин или пароль"), status=401)
             return
 
-        if path in ("/app/lead", "/lead"):
+        if path in ("/app/lead", "/lead", "/ru/lead", "/en/lead"):
             form = parse_form(self)
             project_id = int(form_value(form, "project_id", "0") or 0)
             name = form_value(form, "name").strip()
@@ -6645,12 +6720,20 @@ class Handler(BaseHTTPRequestHandler):
                     tg_user = json.loads(tg_user_raw)
                 except json.JSONDecodeError:
                     tg_user = None
+            lang = "en" if path == "/en/lead" else "ru"
             if not contact:
-                self.send_html(app_project_page(project_id, "Укажите телефон, WhatsApp или Telegram."), status=400)
+                error_message = "Please enter your phone, WhatsApp, or Telegram." if lang == "en" else "Укажите телефон, WhatsApp или Telegram."
+                base_path = "/en" if path == "/en/lead" else ("/ru" if path == "/ru/lead" else ("" if path == "/lead" else "/app"))
+                self.send_html(app_project_page(project_id, error_message, base_path=base_path, lang=lang), status=400)
                 return
             create_web_lead(project_id, name, contact, message, tg_user=tg_user, session_id=session_id)
-            base_path = "" if path == "/lead" else "/app"
-            self.send_html(app_project_page(project_id, "Спасибо, заявка отправлена. @roi_counter свяжется с вами.", base_path=base_path))
+            base_path = "/en" if path == "/en/lead" else ("/ru" if path == "/ru/lead" else ("" if path == "/lead" else "/app"))
+            success_message = (
+                "Thank you, your request has been sent. @roi_counter will contact you."
+                if lang == "en"
+                else "Спасибо, заявка отправлена. @roi_counter свяжется с вами."
+            )
+            self.send_html(app_project_page(project_id, success_message, base_path=base_path, lang=lang))
             return
 
         if path == "/app/event":
