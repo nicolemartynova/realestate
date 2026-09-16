@@ -7,6 +7,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3118,6 +3120,40 @@ def app_filter_options():
     return [row["district"] for row in districts], [row["rooms"] for row in rooms]
 
 
+def slugify(value):
+    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
+    return value or "lot"
+
+
+def rooms_slug(value):
+    raw = str(value or "").lower()
+    if re.search(r"\bstudio\b", raw):
+        return "studio"
+    br_match = re.search(r"\b(\d+)\s*br\b", raw)
+    if br_match:
+        return f"{br_match.group(1)}br"
+    bedroom_match = re.search(r"\b(\d+)\s*bed", raw)
+    if bedroom_match:
+        return f"{bedroom_match.group(1)}br"
+    return slugify(value)
+
+
+def lot_slug(project):
+    building_slug = slugify(project["building"] or project["title"] or project["district"])
+    return f"{building_slug}-{rooms_slug(project['rooms'])}-{project['id']}"
+
+
+def lot_public_path(project, lang="ru"):
+    prefix = "/en" if lang == "en" else "/ru"
+    return f"{prefix}/lots/{lot_slug(project)}"
+
+
+def project_id_from_slug(path):
+    match = re.search(r"-(\d+)$", path.strip("/"))
+    return int(match.group(1)) if match else 0
+
+
 def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     query = query or {}
     lang = "en" if lang == "en" else "ru"
@@ -3164,7 +3200,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     )
     is_public_catalog = base_path in ("", "/ru", "/en")
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
-    lot_path = f"{base_path}/lot" if base_path in ("/ru", "/en", "/app") else "/lot"
+    lot_path = f"{base_path}/lot" if base_path == "/app" else None
     cards = "".join(app_project_card(project, lot_path, lang=lang) for project in projects)
     guide_path = "/en/below-market-property-dubai" if lang == "en" else "/ru/nedvizhimost-v-dubae-nizhe-rynka"
     alternates = catalog_alternates() if is_public_catalog else {}
@@ -3233,8 +3269,9 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
     deal_tags = app_deal_tags(project, lang=lang)
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
+    href = f"{lot_path}?id={project['id']}" if lot_path else lot_public_path(project, lang)
     return f"""
-    <a class="lot-card" href="{escape(lot_path)}?id={project['id']}">
+    <a class="lot-card" href="{escape(href)}">
       <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else escape(photo_placeholder)}</div>
       <div class="lot-body">
         <div class="lot-title"><span>{escape(project['title'])}</span><span class="lot-price">{money(project['price'])} AED</span></div>
@@ -3274,8 +3311,13 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
     is_public_catalog = base_path in ("", "/ru", "/en")
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
     lead_path = f"{base_path}/lead" if base_path in ("/ru", "/en", "/app") else "/lead"
-    lot_path = f"{base_path}/lot" if base_path in ("/ru", "/en", "/app") else "/lot"
-    share_url = f"{PUBLIC_BASE_URL}{lot_path}?id={project['id']}" if PUBLIC_BASE_URL else f"{lot_path}?id={project['id']}"
+    if base_path == "/app":
+        lot_path = f"{base_path}/lot?id={project['id']}"
+    elif base_path in ("/ru", "/en"):
+        lot_path = lot_public_path(project, lang)
+    else:
+        lot_path = f"/lot?id={project['id']}"
+    share_url = f"{PUBLIC_BASE_URL}{lot_path}" if PUBLIC_BASE_URL else lot_path
     share_text = (
         f"Below-market Dubai property lot: {project['title']}"
         if lang == "en"
@@ -3350,11 +3392,11 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
     language_switch = ""
     alternates = {}
     if is_public_catalog:
-        alternates = lot_alternates(project["id"])
+        alternates = lot_alternates(project)
         language_switch = f"""
         <div class="seo-topbar"><nav class="breadcrumbs"><a href="{escape(root_path)}">Below Market UAE</a></nav>
           <div class="language-switch" aria-label="Language switch">
-            {f'<span>RU</span><a href="/en/lot?id={project["id"]}">EN</a>' if lang == 'ru' else f'<a href="/ru/lot?id={project["id"]}">RU</a><span>EN</span>'}
+            {f'<span>RU</span><a href="{escape(lot_public_path(project, "en"))}">EN</a>' if lang == 'ru' else f'<a href="{escape(lot_public_path(project, "ru"))}">RU</a><span>EN</span>'}
           </div>
         </div>
         """
@@ -3390,7 +3432,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         if lang == "en"
         else f"{project['title']} - недвижимость в Дубае ниже рынка | Below Market UAE"
     )
-    canonical_path = f"{base_path}/lot?id={project['id']}" if base_path in ("/ru", "/en") else f"/lot?id={project['id']}"
+    canonical_path = lot_public_path(project, lang) if base_path in ("/ru", "/en") else f"/lot?id={project['id']}"
     return app_layout(
         title,
         content,
@@ -3423,11 +3465,11 @@ def catalog_alternates():
     }
 
 
-def lot_alternates(project_id):
+def lot_alternates(project):
     return {
-        "ru": public_url(f"/ru/lot?id={project_id}"),
-        "en": public_url(f"/en/lot?id={project_id}"),
-        "x-default": public_url(f"/lot?id={project_id}"),
+        "ru": public_url(lot_public_path(project, "ru")),
+        "en": public_url(lot_public_path(project, "en")),
+        "x-default": public_url(f"/lot?id={project['id']}"),
     }
 
 
@@ -3972,8 +4014,8 @@ def llms_txt():
             details.append(f"{discount}% below market")
         if project["distress"]:
             details.append("distress deal")
-        ru_lot_url = public_url(f"/ru/lot?id={project['id']}")
-        en_lot_url = public_url(f"/en/lot?id={project['id']}")
+        ru_lot_url = public_url(lot_public_path(project, "ru"))
+        en_lot_url = public_url(lot_public_path(project, "en"))
         lot_links.append(f"- [{project['title']} RU]({ru_lot_url}) / [EN]({en_lot_url}) - " + ", ".join(str(item) for item in details if item))
     lots_section = "\n".join(lot_links) if lot_links else "- Active listings are updated regularly."
 
@@ -4028,7 +4070,7 @@ def sitemap_xml():
     with db() as conn:
         projects = conn.execute(
             """
-            select id, updated_at, created_at
+            select id, title, district, building, rooms, updated_at, created_at
             from projects
             where status='active'
             order by updated_at desc, id desc
@@ -4042,8 +4084,8 @@ def sitemap_xml():
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
-        urls.append((public_url(f"/ru/lot?id={project['id']}"), lastmod, "daily", "0.8"))
-        urls.append((public_url(f"/en/lot?id={project['id']}"), lastmod, "daily", "0.8"))
+        urls.append((public_url(lot_public_path(project, "ru")), lastmod, "daily", "0.8"))
+        urls.append((public_url(lot_public_path(project, "en")), lastmod, "daily", "0.8"))
     items = "\n".join(
         "  <url>\n"
         f"    <loc>{html.escape(loc)}</loc>\n"
@@ -6524,8 +6566,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def redirect(self, location):
-        self.send_response(303)
+    def redirect(self, location, status=303):
+        self.send_response(status)
         self.send_header("Location", location)
         self.end_headers()
 
@@ -6577,20 +6619,50 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/en/":
             self.send_html(app_projects_page(query, base_path="/en", lang="en"))
         elif path == "/lot":
-            target_prefix = "/ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "/en"
-            self.redirect(f"{target_prefix}/lot" + (f"?{parsed.query}" if parsed.query else ""))
+            target_lang = "ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "en"
+            try:
+                project_id = int(query.get("id", ["0"])[0])
+            except ValueError:
+                project_id = 0
+            project = get_project(project_id)
+            if project and project["status"] == "active":
+                self.redirect(lot_public_path(project, target_lang), status=301)
+            else:
+                self.redirect(f"/{target_lang}/lot" + (f"?{parsed.query}" if parsed.query else ""), status=301)
         elif path == "/ru/lot":
             try:
                 project_id = int(query.get("id", ["0"])[0])
             except ValueError:
                 project_id = 0
-            self.send_html(app_project_page(project_id, base_path="/ru", lang="ru"))
+            project = get_project(project_id)
+            if project and project["status"] == "active":
+                self.redirect(lot_public_path(project, "ru"), status=301)
+            else:
+                self.send_html(app_project_page(project_id, base_path="/ru", lang="ru"))
         elif path == "/en/lot":
             try:
                 project_id = int(query.get("id", ["0"])[0])
             except ValueError:
                 project_id = 0
-            self.send_html(app_project_page(project_id, base_path="/en", lang="en"))
+            project = get_project(project_id)
+            if project and project["status"] == "active":
+                self.redirect(lot_public_path(project, "en"), status=301)
+            else:
+                self.send_html(app_project_page(project_id, base_path="/en", lang="en"))
+        elif path.startswith("/ru/lots/"):
+            project_id = project_id_from_slug(path)
+            project = get_project(project_id)
+            if project and project["status"] == "active" and path != lot_public_path(project, "ru"):
+                self.redirect(lot_public_path(project, "ru"), status=301)
+            else:
+                self.send_html(app_project_page(project_id, base_path="/ru", lang="ru"))
+        elif path.startswith("/en/lots/"):
+            project_id = project_id_from_slug(path)
+            project = get_project(project_id)
+            if project and project["status"] == "active" and path != lot_public_path(project, "en"):
+                self.redirect(lot_public_path(project, "en"), status=301)
+            else:
+                self.send_html(app_project_page(project_id, base_path="/en", lang="en"))
         elif path == "/ru/nedvizhimost-v-dubae-nizhe-rynka":
             self.send_html(below_market_ru_page())
         elif path == "/en/below-market-property-dubai":
