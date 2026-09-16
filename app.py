@@ -3118,8 +3118,9 @@ def app_filter_options():
     return [row["district"] for row in districts], [row["rooms"] for row in rooms]
 
 
-def app_projects_page(query=None, message="", base_path="/app"):
+def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     query = query or {}
+    lang = "en" if lang == "en" else "ru"
     search = (query.get("q", [""])[0] or "").strip()
     district = (query.get("district", [""])[0] or "").strip()
     rooms = (query.get("rooms", [""])[0] or "").strip()
@@ -3153,53 +3154,88 @@ def app_projects_page(query=None, message="", base_path="/app"):
             params,
         ).fetchall()
     districts, rooms_options = app_filter_options()
-    district_options = '<option value="">Все районы</option>' + "".join(
+    district_options = f'<option value="">{"All areas" if lang == "en" else "Все районы"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == district else ""}>{escape(item)}</option>'
         for item in districts
     )
-    rooms_select = '<option value="">Любые комнаты</option>' + "".join(
+    rooms_select = f'<option value="">{"Any bedrooms" if lang == "en" else "Любые комнаты"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == rooms else ""}>{escape(item)}</option>'
         for item in rooms_options
     )
-    root_path = base_path or "/"
-    lot_path = f"{base_path}/lot" if base_path else "/lot"
-    lead_path = f"{base_path}/lead" if base_path else "/lead"
-    cards = "".join(app_project_card(project, lot_path) for project in projects)
+    is_public_catalog = base_path in ("", "/ru", "/en")
+    root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
+    lot_path = "/lot" if is_public_catalog else f"{base_path}/lot"
+    cards = "".join(app_project_card(project, lot_path, lang=lang) for project in projects)
+    guide_path = "/en/below-market-property-dubai" if lang == "en" else "/ru/nedvizhimost-v-dubae-nizhe-rynka"
+    alternates = catalog_alternates() if is_public_catalog else {}
+    language_switch = ""
+    if is_public_catalog:
+        language_switch = f"""
+        <div class="language-switch" aria-label="Language switch">
+          {f'<span>RU</span><a href="/en/">EN</a>' if lang == 'ru' else f'<a href="/ru/">RU</a><span>EN</span>'}
+        </div>
+        """
+    if lang == "en":
+        title = "Below-market property in Dubai | Below Market UAE"
+        h1 = "Below-market property lots in Dubai"
+        intro = "Choose an area, budget, and property format. Request details on a lot you like, and @roi_counter will contact you."
+        guide_text = "How to find below-market property in Dubai: a guide by Below Market UAE"
+        search_placeholder = "Area, building, or title"
+        max_price_placeholder = "Price up to, AED"
+        find_label = "Search"
+        reset_label = "Reset"
+        empty_text = "There are no active lots for the selected filters. Try changing filters or request a personal selection."
+        description = "Below Market UAE catalog: current Dubai property lots below market price, distress deals, urgent sales, and investment opportunities."
+    else:
+        title = "Недвижимость в Дубае ниже рынка | Below Market UAE"
+        h1 = "Лоты недвижимости в Дубае ниже рынка"
+        intro = "Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами."
+        guide_text = "Как находить недвижимость в Дубае ниже рынка: guide от Below Market UAE"
+        search_placeholder = "Район, здание или название"
+        max_price_placeholder = "Цена до, AED"
+        find_label = "Найти"
+        reset_label = "Сбросить"
+        empty_text = "По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор."
+        description = "Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты."
     content = f"""
+    {f'<div class="seo-topbar"><nav class="breadcrumbs"><span>Below Market UAE</span></nav>{language_switch}</div>' if language_switch else ''}
     <section class="app-hero">
       <div class="app-brand">Below Market Dubai</div>
-      <h1>Лоты недвижимости в Дубае ниже рынка</h1>
-      <p>Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами.</p>
-      <p><a href="/ru/nedvizhimost-v-dubae-nizhe-rynka">Как находить недвижимость в Дубае ниже рынка: guide от Below Market UAE</a></p>
+      <h1>{escape(h1)}</h1>
+      <p>{escape(intro)}</p>
+      <p><a href="{escape(guide_path)}">{escape(guide_text)}</a></p>
     </section>
     <form class="app-filters" method="get" action="{escape(root_path)}">
-      <input name="q" value="{escape(search)}" placeholder="Район, здание или название">
+      <input name="q" value="{escape(search)}" placeholder="{escape(search_placeholder)}">
       <select name="district">{district_options}</select>
       <select name="rooms">{rooms_select}</select>
-      <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="Цена до, AED">
-      <button>Найти</button>
-      <a class="app-button secondary" href="{escape(root_path)}">Сбросить</a>
+      <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="{escape(max_price_placeholder)}">
+      <button>{escape(find_label)}</button>
+      <a class="app-button secondary" href="{escape(root_path)}">{escape(reset_label)}</a>
     </form>
-    {f'<section class="lot-grid">{cards}</section>' if cards else '<div class="empty-state">По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор.</div>'}
+    {f'<section class="lot-grid">{cards}</section>' if cards else f'<div class="empty-state">{escape(empty_text)}</div>'}
     """
     return app_layout(
-        "Недвижимость в Дубае ниже рынка | Below Market UAE",
+        title,
         content,
         message,
         catalog_event="catalog_open",
-        description="Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты.",
-        canonical_url=public_url("/"),
-        noindex=bool(base_path),
+        description=description,
+        canonical_url=public_url(root_path if is_public_catalog else "/app"),
+        noindex=not is_public_catalog,
+        lang=lang,
+        alternate_urls=alternates,
     )
 
 
-def app_project_card(project, lot_path="/app/lot"):
+def app_project_card(project, lot_path="/app/lot", lang="ru"):
     cover = project_cover(project["id"])
     deal_tags = app_deal_tags(project)
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
+    photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
     return f"""
     <a class="lot-card" href="{escape(lot_path)}?id={project['id']}">
-      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else 'Фото скоро появятся'}</div>
+      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else escape(photo_placeholder)}</div>
       <div class="lot-body">
         <div class="lot-title"><span>{escape(project['title'])}</span><span class="lot-price">{money(project['price'])} AED</span></div>
         <div>{escape(project['building'])}<br><span class="muted">{escape(project['district'])}</span></div>
@@ -3320,6 +3356,14 @@ def below_market_alternates():
         "ru": public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"),
         "en": public_url("/en/below-market-property-dubai"),
         "x-default": public_url("/below-market-property-dubai"),
+    }
+
+
+def catalog_alternates():
+    return {
+        "ru": public_url("/ru/"),
+        "en": public_url("/en/"),
+        "x-default": public_url("/"),
     }
 
 
@@ -3880,7 +3924,8 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - Market: Dubai, United Arab Emirates
 - Main service: curated Dubai real estate lots below market price
 - Public website: {public_url('/')}
-- Public lot catalog: {public_url('/')}
+- Russian public catalog: {public_url('/ru/')}
+- English public catalog: {public_url('/en/')}
 - Telegram bot: https://t.me/{BOT_USERNAME}
 - Contact: Alexander Vinogradov, licensed real estate broker in Dubai
 - Telegram contact: https://t.me/roi_counter
@@ -3897,7 +3942,8 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 
 ## Important public pages
 
-- [Homepage and public catalog]({public_url('/')})
+- [Russian catalog]({public_url('/ru/')})
+- [English catalog]({public_url('/en/')})
 - [Russian guide: недвижимость в Дубае ниже рынка]({public_url('/ru/nedvizhimost-v-dubae-nizhe-rynka')})
 - [English guide: below-market property in Dubai]({public_url('/en/below-market-property-dubai')})
 - [XML sitemap]({public_url('/sitemap.xml')})
@@ -3924,7 +3970,8 @@ def sitemap_xml():
             """
         ).fetchall()
     urls = [
-        (public_url("/"), now_local().date().isoformat(), "daily", "1.0"),
+        (public_url("/ru/"), now_local().date().isoformat(), "daily", "1.0"),
+        (public_url("/en/"), now_local().date().isoformat(), "daily", "1.0"),
         (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), now_local().date().isoformat(), "weekly", "0.9"),
         (public_url("/en/below-market-property-dubai"), now_local().date().isoformat(), "weekly", "0.9"),
     ]
@@ -6453,7 +6500,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_html("Not found", status=404)
         elif path == "/":
-            self.send_html(app_projects_page(query, base_path=""))
+            target = "/ru/" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "/en/"
+            self.redirect(target + (f"?{parsed.query}" if parsed.query else ""))
+        elif path == "/ru":
+            self.redirect("/ru/" + (f"?{parsed.query}" if parsed.query else ""))
+        elif path == "/en":
+            self.redirect("/en/" + (f"?{parsed.query}" if parsed.query else ""))
+        elif path == "/ru/":
+            self.send_html(app_projects_page(query, base_path="/ru", lang="ru"))
+        elif path == "/en/":
+            self.send_html(app_projects_page(query, base_path="/en", lang="en"))
         elif path == "/lot":
             try:
                 project_id = int(query.get("id", ["0"])[0])
