@@ -3149,9 +3149,40 @@ def lot_public_path(project, lang="ru"):
     return f"{prefix}/lots/{lot_slug(project)}"
 
 
+def district_slug(district):
+    return slugify(district)
+
+
+def district_public_path(district, lang="ru"):
+    slug = district_slug(district)
+    if lang == "en":
+        return f"/en/{slug}-below-market-property"
+    return f"/ru/{slug}"
+
+
 def project_id_from_slug(path):
     match = re.search(r"-(\d+)$", path.strip("/"))
     return int(match.group(1)) if match else 0
+
+
+def active_district_rows():
+    with db() as conn:
+        return conn.execute(
+            """
+            select district, count(*) as lots_count, min(price) as min_price, max(updated_at) as lastmod
+            from projects
+            where status='active' and district != ''
+            group by district
+            order by district
+            """
+        ).fetchall()
+
+
+def district_by_slug(slug):
+    for row in active_district_rows():
+        if district_slug(row["district"]) == slug:
+            return row
+    return None
 
 
 def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
@@ -3202,6 +3233,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
     lot_path = f"{base_path}/lot" if base_path == "/app" else None
     cards = "".join(app_project_card(project, lot_path, lang=lang) for project in projects)
+    district_rows = active_district_rows() if is_public_catalog else []
     guide_path = "/en/below-market-property-dubai" if lang == "en" else "/ru/nedvizhimost-v-dubae-nizhe-rynka"
     alternates = catalog_alternates() if is_public_catalog else {}
     language_switch = ""
@@ -3222,6 +3254,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         reset_label = "Reset"
         empty_text = "There are no active lots for the selected filters. Try changing filters or request a personal selection."
         description = "Below Market UAE catalog: current Dubai property lots below market price, distress deals, urgent sales, and investment opportunities."
+        districts_title = "Active areas"
     else:
         title = "Недвижимость в Дубае ниже рынка | Below Market UAE"
         h1 = "Лоты недвижимости в Дубае ниже рынка"
@@ -3233,6 +3266,19 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         reset_label = "Сбросить"
         empty_text = "По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор."
         description = "Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты."
+        districts_title = "Активные районы"
+    districts_html = ""
+    if district_rows:
+        district_links = "".join(
+            f'<a class="app-button secondary" href="{escape(district_public_path(row["district"], lang))}">{escape(row["district"])} · {row["lots_count"]}</a>'
+            for row in district_rows
+        )
+        districts_html = f"""
+        <section class="seo-card">
+          <h2>{escape(districts_title)}</h2>
+          <div class="filter-actions">{district_links}</div>
+        </section>
+        """
     content = f"""
     {f'<div class="seo-topbar"><nav class="breadcrumbs"><span>Below Market UAE</span></nav>{language_switch}</div>' if language_switch else ''}
     <section class="app-hero">
@@ -3249,6 +3295,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <button>{escape(find_label)}</button>
       <a class="app-button secondary" href="{escape(root_path)}">{escape(reset_label)}</a>
     </form>
+    {districts_html}
     {f'<section class="lot-grid">{cards}</section>' if cards else f'<div class="empty-state">{escape(empty_text)}</div>'}
     """
     return app_layout(
@@ -3285,6 +3332,114 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
       </div>
     </a>
     """
+
+
+def district_alternates(district):
+    return {
+        "ru": public_url(district_public_path(district, "ru")),
+        "en": public_url(district_public_path(district, "en")),
+        "x-default": public_url(district_public_path(district, "en")),
+    }
+
+
+def district_page(district, lang="ru"):
+    lang = "en" if lang == "en" else "ru"
+    with db() as conn:
+        projects = conn.execute(
+            """
+            select *
+            from projects
+            where status='active' and district = ?
+            order by updated_at desc, id desc
+            """,
+            (district,),
+        ).fetchall()
+    if not projects:
+        fallback_message = "There are no active lots in this area right now." if lang == "en" else "Сейчас в этом районе нет активных лотов."
+        return app_projects_page(message=fallback_message, base_path=f"/{lang}", lang=lang)
+    min_price = min(project["price"] for project in projects if project["price"])
+    cards = "".join(app_project_card(project, None, lang=lang) for project in projects)
+    alternates = district_alternates(district)
+    is_outside_dubai = any(marker in district.lower() for marker in ("abu dhabi", "sharjah"))
+    market_en = "UAE" if is_outside_dubai else "Dubai"
+    market_ru = "ОАЭ" if is_outside_dubai else "Дубае"
+    market_ru_place = "ОАЭ" if is_outside_dubai else "Дубай"
+    language_switch = f"""
+    <div class="language-switch" aria-label="Language switch">
+      {f'<span>RU</span><a href="{escape(district_public_path(district, "en"))}">EN</a>' if lang == 'ru' else f'<a href="{escape(district_public_path(district, "ru"))}">RU</a><span>EN</span>'}
+    </div>
+    """
+    if lang == "en":
+        title = f"{district} below-market property | {market_en} deals | Below Market UAE"
+        h1 = f"Below-market property in {district}"
+        intro = (
+            f"Current {market_en} property lots in {district} selected for below-market pricing, distress opportunities, "
+            "urgent sales, and investment potential. Each listing includes price, building, area, availability, and discount context."
+        )
+        stats_label = "Active lots"
+        min_price_label = "Prices from"
+        lots_title = f"Available lots in {district}"
+        faq_title = "FAQ"
+        faq_items = [
+            (f"Are these {district} properties actually below market?", "We compare each lot against available market references, building context, and seller conditions before adding it to the catalog."),
+            ("How do I request details?", "Open a lot and submit the contact form. Alexander Vinogradov or the team will contact you in Telegram, WhatsApp, or by phone."),
+            ("How often are lots updated?", "The catalog is updated as active opportunities change. Sold or irrelevant lots are removed from public pages."),
+        ]
+        description = f"Active below-market {market_en} property lots in {district}: prices, buildings, areas, discounts, distress deals, and contact form."
+        back_label = "All lots"
+    else:
+        title = f"{district}: недвижимость ниже рынка в {market_ru} | Below Market UAE"
+        h1 = f"Недвижимость ниже рынка в {district}"
+        intro = (
+            f"Актуальные лоты недвижимости в районе {district}, отобранные по цене ниже рынка, срочности продажи "
+            "или инвестиционной привлекательности. В карточках указаны цена, здание, площадь, статус и ориентир выгоды."
+        )
+        stats_label = "Активные лоты"
+        min_price_label = "Цена от"
+        lots_title = f"Доступные лоты в {district}"
+        faq_title = "Вопросы по району"
+        faq_items = [
+            (f"Это действительно недвижимость ниже рынка в {district}?", "Мы сравниваем цену лота с доступными рыночными ориентирами, контекстом здания и условиями продавца перед публикацией."),
+            ("Как получить подробности по объекту?", "Откройте карточку лота и оставьте контакт. Александр Виноградов или команда свяжется с вами в Telegram, WhatsApp или по телефону."),
+            ("Как часто обновляются лоты?", "Каталог обновляется по мере появления и снятия актуальных предложений. Неактуальные объекты удаляются из публичных страниц."),
+        ]
+        description = f"Актуальные лоты недвижимости ниже рынка в районе {district}, {market_ru_place}: цены, здания, площадь, скидки, distress deals и заявка на подбор."
+        back_label = "Все лоты"
+    faq_html = "".join(
+        f"<details><summary>{escape(question)}</summary><p>{escape(answer)}</p></details>"
+        for question, answer in faq_items
+    )
+    content = f"""
+    <div class="seo-topbar"><nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>{escape(district)}</span></nav>{language_switch}</div>
+    <section class="app-hero">
+      <div class="app-brand">Below Market Dubai</div>
+      <h1>{escape(h1)}</h1>
+      <p>{escape(intro)}</p>
+      <div class="facts">
+        <div class="fact"><small>{escape(stats_label)}</small>{len(projects)}</div>
+        <div class="fact"><small>{escape(min_price_label)}</small>{money(min_price)} AED</div>
+      </div>
+    </section>
+    <a class="back-link" href="/{lang}/">← {escape(back_label)}</a>
+    <section>
+      <h2>{escape(lots_title)}</h2>
+      <div class="lot-grid">{cards}</div>
+    </section>
+    <section class="seo-card">
+      <h2>{escape(faq_title)}</h2>
+      <div class="faq-list">{faq_html}</div>
+    </section>
+    """
+    return app_layout(
+        title,
+        content,
+        catalog_event="catalog_open",
+        description=description,
+        canonical_url=public_url(district_public_path(district, lang)),
+        noindex=False,
+        lang=lang,
+        alternate_urls=alternates,
+    )
 
 
 def app_deal_tags(project, lang="ru"):
@@ -3999,6 +4154,15 @@ def llms_txt():
             limit 25
             """
         ).fetchall()
+        districts = conn.execute(
+            """
+            select district, count(*) as lots_count
+            from projects
+            where status='active' and district != ''
+            group by district
+            order by district
+            """
+        ).fetchall()
 
     lot_links = []
     for project in projects:
@@ -4018,6 +4182,12 @@ def llms_txt():
         en_lot_url = public_url(lot_public_path(project, "en"))
         lot_links.append(f"- [{project['title']} RU]({ru_lot_url}) / [EN]({en_lot_url}) - " + ", ".join(str(item) for item in details if item))
     lots_section = "\n".join(lot_links) if lot_links else "- Active listings are updated regularly."
+    district_links = [
+        f"- [{row['district']} RU]({public_url(district_public_path(row['district'], 'ru'))}) / "
+        f"[EN]({public_url(district_public_path(row['district'], 'en'))}) - {row['lots_count']} active lots"
+        for row in districts
+    ]
+    districts_section = "\n".join(district_links) if district_links else "- Area pages are generated for districts with active lots."
 
     return f"""# Below Market UAE
 
@@ -4056,6 +4226,10 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
+## Active area pages
+
+{districts_section}
+
 ## Active public lots
 
 {lots_section}
@@ -4076,6 +4250,15 @@ def sitemap_xml():
             order by updated_at desc, id desc
             """
         ).fetchall()
+        districts = conn.execute(
+            """
+            select district, max(updated_at) as lastmod
+            from projects
+            where status='active' and district != ''
+            group by district
+            order by district
+            """
+        ).fetchall()
     urls = [
         (public_url("/ru/"), now_local().date().isoformat(), "daily", "1.0"),
         (public_url("/en/"), now_local().date().isoformat(), "daily", "1.0"),
@@ -4086,6 +4269,10 @@ def sitemap_xml():
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
         urls.append((public_url(lot_public_path(project, "ru")), lastmod, "daily", "0.8"))
         urls.append((public_url(lot_public_path(project, "en")), lastmod, "daily", "0.8"))
+    for district in districts:
+        lastmod = (district["lastmod"] or now_local().date().isoformat())[:10]
+        urls.append((public_url(district_public_path(district["district"], "ru")), lastmod, "daily", "0.85"))
+        urls.append((public_url(district_public_path(district["district"], "en")), lastmod, "daily", "0.85"))
     items = "\n".join(
         "  <url>\n"
         f"    <loc>{html.escape(loc)}</loc>\n"
@@ -4475,6 +4662,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .seo-card, .seo-section, .seo-cta, .broker-card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; }
 .seo-card { display:grid; gap:6px; }
 .seo-card strong { font-size:18px; }
+.filter-actions { display:flex; flex-wrap:wrap; gap:8px; }
 .seo-card span, .seo-section p, .seo-columns p, .seo-table span, .broker-card dd { color:var(--muted); }
 .seo-section { display:grid; gap:12px; }
 .seo-section h2, .seo-cta h2 { margin:0; font-size:28px; line-height:1.15; }
@@ -6672,6 +6860,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect("/ru/nedvizhimost-v-dubae-nizhe-rynka")
             else:
                 self.redirect("/en/below-market-property-dubai")
+        elif path.startswith("/ru/") and path.count("/") == 2:
+            slug = path.removeprefix("/ru/")
+            district = district_by_slug(slug)
+            if district:
+                self.send_html(district_page(district["district"], lang="ru"))
+            else:
+                self.send_html("Not found", status=404)
+        elif path.startswith("/en/") and path.endswith("-below-market-property") and path.count("/") == 2:
+            slug = path.removeprefix("/en/").removesuffix("-below-market-property")
+            district = district_by_slug(slug)
+            if district:
+                self.send_html(district_page(district["district"], lang="en"))
+            else:
+                self.send_html("Not found", status=404)
         elif path == "/app":
             self.send_html(app_projects_page(query))
         elif path == "/app/lot":
