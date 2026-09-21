@@ -4166,6 +4166,8 @@ RU_BLOG_PATH = "/ru/blog/"
 EN_BLOG_PATH = "/en/blog/"
 RU_PAYMENT_ARTICLE_PATH = "/ru/blog/prosrochka-platezha-za-kvartiru-v-dubae"
 EN_PAYMENT_ARTICLE_PATH = "/en/blog/missed-off-plan-property-payment-dubai"
+RU_NEGOTIATION_ARTICLE_PATH = "/ru/blog/kak-dogovoritsya-po-cene-s-sobstvennikom-kvartiry-v-dubae"
+EN_NEGOTIATION_ARTICLE_PATH = "/en/blog/how-to-negotiate-apartment-price-with-owner-dubai"
 BLOG_PUBLISHED_DATE = "2026-09-21"
 
 
@@ -4185,11 +4187,18 @@ def payment_article_alternates():
     }
 
 
+def negotiation_article_alternates():
+    return {
+        "ru": public_url(RU_NEGOTIATION_ARTICLE_PATH),
+        "en": public_url(EN_NEGOTIATION_ARTICLE_PATH),
+        "x-default": public_url("/blog/how-to-negotiate-apartment-price-with-owner-dubai"),
+    }
+
+
 def blog_index_page(lang="ru"):
     lang = "en" if lang == "en" else "ru"
     is_en = lang == "en"
     path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
-    article_path = EN_PAYMENT_ARTICLE_PATH if is_en else RU_PAYMENT_ARTICLE_PATH
     title = "Dubai Property Insights | Below Market UAE" if is_en else "Блог о недвижимости Дубая | Below Market UAE"
     description = (
         "Practical guidance on Dubai property, off-plan investments, payment plans, distress deals, and buying below market from a licensed Dubai broker."
@@ -4202,16 +4211,20 @@ def blog_index_page(lang="ru"):
         if is_en
         else "Практические материалы для покупателей и инвесторов: платежные планы, риски off-plan, distress deals, перепродажа и объекты ниже рынка."
     )
-    article_title = (
-        "What to do if you cannot make an off-plan property payment in Dubai"
-        if is_en
-        else "Что делать, если вы не можете внести платеж за квартиру в Дубае"
-    )
-    article_summary = (
-        "How to contact the developer, assess a resale, understand the DLD notice procedure, and reduce the risk of contract termination."
-        if is_en
-        else "Как договориться с застройщиком, оценить перепродажу, разобраться в процедуре DLD и снизить риск расторжения договора."
-    )
+    articles = [
+        {
+            "path": EN_PAYMENT_ARTICLE_PATH if is_en else RU_PAYMENT_ARTICLE_PATH,
+            "title": "What to do if you cannot make an off-plan property payment in Dubai" if is_en else "Что делать, если вы не можете внести платеж за квартиру в Дубае",
+            "summary": "How to contact the developer, assess a resale, understand the DLD notice procedure, and reduce the risk of contract termination." if is_en else "Как договориться с застройщиком, оценить перепродажу, разобраться в процедуре DLD и снизить риск расторжения договора.",
+            "category": "Off-plan property" if is_en else "Off-plan недвижимость",
+        },
+        {
+            "path": EN_NEGOTIATION_ARTICLE_PATH if is_en else RU_NEGOTIATION_ARTICLE_PATH,
+            "title": "How to negotiate the price with a Dubai apartment owner when buying?" if is_en else "Как договориться по цене с собственником квартиры Дубае при покупке?",
+            "summary": "Three practical arguments for negotiating the price of a ready apartment with its owner in Dubai." if is_en else "Три аргумента для переговоров о цене готовой квартиры с собственником в Дубае.",
+            "category": "Ready property" if is_en else "Готовая недвижимость",
+        },
+    ]
     read_label = "Read article" if is_en else "Читать статью"
     catalog_label = "View current lots" if is_en else "Смотреть актуальные лоты"
     structured_data = [
@@ -4223,7 +4236,10 @@ def blog_index_page(lang="ru"):
             "url": public_url(path),
             "inLanguage": "en" if is_en else "ru",
             "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
-            "hasPart": [{"@type": "Article", "headline": article_title, "url": public_url(article_path)}],
+            "hasPart": [
+                {"@type": "Article", "headline": article["title"], "url": public_url(article["path"])}
+                for article in articles
+            ],
         },
         {
             "@context": "https://schema.org",
@@ -4235,6 +4251,17 @@ def blog_index_page(lang="ru"):
         },
     ]
     alternates = blog_alternates()
+    article_cards = "".join(
+        f"""
+        <article class="blog-card">
+          <div class="blog-card-meta">{BLOG_PUBLISHED_DATE} · {escape(article['category'])}</div>
+          <h2><a href="{escape(article['path'])}">{escape(article['title'])}</a></h2>
+          <p>{escape(article['summary'])}</p>
+          <a class="app-button" href="{escape(article['path'])}">{escape(read_label)}</a>
+        </article>
+        """
+        for article in articles
+    )
     content = f"""
     <article class="seo-page blog-index">
       <div class="seo-topbar">
@@ -4249,12 +4276,7 @@ def blog_index_page(lang="ru"):
         <p>{escape(intro)}</p>
       </section>
       <section class="blog-grid">
-        <article class="blog-card">
-          <div class="blog-card-meta">{BLOG_PUBLISHED_DATE} · {'Off-plan property' if is_en else 'Off-plan недвижимость'}</div>
-          <h2><a href="{escape(article_path)}">{escape(article_title)}</a></h2>
-          <p>{escape(article_summary)}</p>
-          <a class="app-button" href="{escape(article_path)}">{escape(read_label)}</a>
-        </article>
+        {article_cards}
       </section>
       <section class="seo-cta">
         <h2>{'Looking for a property below market?' if is_en else 'Ищете недвижимость ниже рынка?'}</h2>
@@ -4279,7 +4301,7 @@ def blog_index_page(lang="ru"):
     )
 
 
-def article_lead_form(lang="ru"):
+def article_lead_form(lang="ru", article_slug="payment-default"):
     is_en = lang == "en"
     return f"""
     <section class="article-lead" id="consultation">
@@ -4289,7 +4311,7 @@ def article_lead_form(lang="ru"):
         <p>{'Describe your situation. Alexander will review the details and contact you personally.' if is_en else 'Опишите вашу ситуацию. Александр изучит детали и свяжется с вами лично.'}</p>
       </div>
       <form class="lead-form article-lead-form" method="post" action="/{lang}/blog/lead">
-        <input type="hidden" name="article" value="payment-default">
+        <input type="hidden" name="article" value="{escape(article_slug)}">
         <input name="name" required autocomplete="name" placeholder="{'Your name' if is_en else 'Ваше имя'}">
         <input name="contact" required autocomplete="tel" placeholder="{'Phone, WhatsApp, or Telegram' if is_en else 'Телефон, WhatsApp или Telegram'}">
         <textarea name="message" placeholder="{'Briefly describe your situation' if is_en else 'Кратко опишите вашу ситуацию'}"></textarea>
@@ -4299,7 +4321,7 @@ def article_lead_form(lang="ru"):
     </section>
     <script>
     (function() {{
-      var details = {{article_slug:'payment-default', article_language:{json.dumps(lang)}}};
+      var details = {{article_slug:{json.dumps(article_slug)}, article_language:{json.dumps(lang)}}};
       window.dataLayer = window.dataLayer || [];
       window.dataLayer.push(Object.assign({{event:'article_view'}}, details));
       if (typeof window.ym === 'function' && {json.dumps(bool(YANDEX_METRIKA_ID))}) {{
@@ -4498,7 +4520,7 @@ def payment_article_page(lang="ru", message=""):
         <h2>{escape(faq_title)}</h2>
         <div class="faq-list">{faq_html}</div>
       </section>
-      {article_lead_form(lang)}
+      {article_lead_form(lang, "payment-default")}
     </article>
     """
     return app_layout(
@@ -4511,6 +4533,128 @@ def payment_article_page(lang="ru", message=""):
         lang=lang,
         alternate_urls=alternates,
         keywords=article_schema["keywords"],
+        og_type="article",
+        og_image=public_url("/assets/aleksandr-vinogradov.jpg"),
+    )
+
+
+def negotiation_article_page(lang="ru", message=""):
+    lang = "en" if lang == "en" else "ru"
+    is_en = lang == "en"
+    path = EN_NEGOTIATION_ARTICLE_PATH if is_en else RU_NEGOTIATION_ARTICLE_PATH
+    blog_path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
+    alternates = negotiation_article_alternates()
+    h1 = (
+        "How to negotiate the price with a Dubai apartment owner when buying?"
+        if is_en
+        else "Как договориться по цене с собственником квартиры Дубае при покупке?"
+    )
+    title = (
+        "How to negotiate an apartment price in Dubai | Below Market UAE"
+        if is_en
+        else "Как договориться о цене квартиры в Дубае | Below Market UAE"
+    )
+    description = (
+        "How to negotiate a ready apartment price in Dubai using the payment method, listing price history, and comparable transaction data."
+        if is_en
+        else "Как договориться о цене готовой квартиры в Дубае: способ оплаты, история объявления и данные о сделках в доме как аргументы для торга."
+    )
+    keywords = (
+        "how to negotiate apartment price in Dubai, Dubai property price negotiation, negotiate with property seller Dubai, buy ready apartment Dubai"
+        if is_en
+        else "как договориться о цене квартиры в Дубае, торг при покупке квартиры в Дубае, как снизить цену недвижимости в Дубае, покупка готовой квартиры в Дубае"
+    )
+    if is_en:
+        body = """
+        <p class="article-lead-text">It is no secret that owners overprice most ready apartments in Dubai.<br>However, you can immediately reduce the price by 10-15% if you use these exact arguments:</p>
+        <p>1) Ask the seller whether they are interested in mortgage buyers or are only considering a cash sale.<br>If the owner chooses the second option, this is an important signal: the sale is urgent, and the seller will be more open to negotiation because a mortgage transaction can extend the process by an additional 2-3 months, while the owner is not prepared to wait that long because the funds are needed right now.</p>
+        <p>2) Study the seller's listing.<br>On Propertyfinder and Bayut, for the specific apartment listed for sale, you can see the price history: how long the listing has been active and when the owner decided to reduce the price. All of this can be used to strengthen your negotiating position.</p>
+        <p>3) The transaction history in DXB Interact and Propertymonitor highlights not only sales within a specific building, but also the series, meaning you can effectively show the owner the price at which their neighbour two floors above sold an apartment.</p>
+        <p>These are far from the only arguments that can help you buy property in Dubai at its fair price. If you are looking for a ready apartment here, send me a private message on Telegram: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Aleksandr Vinogradov is a licensed Dubai real estate broker. He helps buyers assess ready properties, analyse transaction data, and negotiate with sellers."
+        breadcrumb = "Price negotiation"
+    else:
+        body = """
+        <p class="article-lead-text">Ни для кого не секрет, что на большинство готовых квартир в Дубае собственники завышают её рыночную стоимость.<br>Однако цену можно сразу сбить на 10-15%, если использовать именно эти аргументы:</p>
+        <p>1) Уточните у продавца, интересуют ли его покупатели-ипотечники, или он рассматривает только продажу за наличные.<br>Если собственник выбирает второй вариант, то это важный сигнал: продажа срочная, и продавец будет более сговорчивым, так как ипотечная сделка может растянуть процесс дополнительно на 2-3 месяца, а собственник не готов столько ждать, поскольку средства нужны именно сейчас.</p>
+        <p>2) Изучите объявление продавца.<br>На площадках Propertyfinder и Bayut по конкретной квартире, что выставлена на продажу, можно увидеть историю цены: как долго объявление висит и когда собственник принял решение снижать стоимость. Всё это можно использовать для усиления собственной переговорной позиции.</p>
+        <p>3) История транзакций в DXB Interact и Propertymonitor подсвечивает не просто продажи внутри конкретного дома, но и серию, то есть вы фактически можете показать владельцу, за какую цену продавал квартиру его же сосед двумя этажами выше.</p>
+        <p>Это далеко не единственные аргументы, которые помогут приобрести недвижимость в Дубае по её справедливой цене. Если ищете здесь готовую квартиру, напишите в личные сообщения в телеграм: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Александр Виноградов — лицензированный брокер по недвижимости в Дубае. Помогает покупателям оценивать готовые объекты, анализировать данные о сделках и вести переговоры с продавцами."
+        breadcrumb = "Переговоры о цене"
+    article_schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": h1,
+        "description": description,
+        "url": public_url(path),
+        "mainEntityOfPage": public_url(path),
+        "datePublished": BLOG_PUBLISHED_DATE,
+        "dateModified": BLOG_PUBLISHED_DATE,
+        "inLanguage": lang,
+        "author": {
+            "@type": "Person",
+            "name": "Aleksandr Vinogradov",
+            "alternateName": "Александр Виноградов",
+            "image": public_url("/assets/aleksandr-vinogradov.jpg"),
+            "jobTitle": "Licensed Real Estate Broker in Dubai",
+            "identifier": "Broker No. 88673",
+            "sameAs": ["https://t.me/roi_counter"],
+        },
+        "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
+        "about": ["Dubai ready property", "property price negotiation", "Dubai real estate"],
+        "keywords": keywords,
+    }
+    structured_data = [
+        article_schema,
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(f"/{lang}/")},
+                {"@type": "ListItem", "position": 2, "name": "Blog" if is_en else "Блог", "item": public_url(blog_path)},
+                {"@type": "ListItem", "position": 3, "name": h1, "item": public_url(path)},
+            ],
+        },
+    ]
+    content = f"""
+    <article class="seo-page article-page">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>/</span><a href="{escape(blog_path)}">{'Blog' if is_en else 'Блог'}</a><span>/</span><span>{escape(breadcrumb)}</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          {f'<a href="{escape(alternates["ru"])}">RU</a><span>EN</span>' if is_en else f'<span>RU</span><a href="{escape(alternates["en"])}">EN</a>'}
+        </div>
+      </div>
+      <header class="article-header">
+        <div class="app-brand">{'Ready property in Dubai' if is_en else 'Готовая недвижимость Дубая'}</div>
+        <h1>{escape(h1)}</h1>
+        <div class="article-byline"><span>{'By: Aleksandr Vinogradov' if is_en else 'Автор: Александр Виноградов'}</span><span>{BLOG_PUBLISHED_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
+      </header>
+      <div class="article-layout">
+        <div class="article-body">{body}</div>
+        <aside class="article-author">
+          <img class="article-author-photo" src="/assets/aleksandr-vinogradov.jpg" alt="{'Aleksandr Vinogradov, licensed real estate broker in Dubai' if is_en else 'Александр Виноградов, лицензированный брокер по недвижимости в Дубае'}" width="112" height="112" loading="lazy">
+          <div class="app-brand">{'Author' if is_en else 'Автор статьи'}</div>
+          <h2>{'Aleksandr Vinogradov' if is_en else 'Александр Виноградов'}</h2>
+          <p>{escape(author_intro)}</p>
+          <dl><div><dt>{'Status' if is_en else 'Статус'}</dt><dd>{'Licensed Dubai real estate broker' if is_en else 'Лицензированный брокер в Дубае'}</dd></div><div><dt>{'Broker number' if is_en else 'Номер брокера'}</dt><dd>88673</dd></div><div><dt>{'Contact' if is_en else 'Контакт'}</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a></dd></div></dl>
+        </aside>
+      </div>
+      {article_lead_form(lang, "price-negotiation")}
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        message=message,
+        description=description,
+        canonical_url=public_url(path),
+        structured_data=structured_data,
+        lang=lang,
+        alternate_urls=alternates,
+        keywords=keywords,
         og_type="article",
         og_image=public_url("/assets/aleksandr-vinogradov.jpg"),
     )
@@ -4627,6 +4771,8 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - [English property blog]({public_url(EN_BLOG_PATH)})
 - [RU: что делать при просрочке платежа за квартиру в Дубае]({public_url(RU_PAYMENT_ARTICLE_PATH)})
 - [EN: missed off-plan property payment in Dubai]({public_url(EN_PAYMENT_ARTICLE_PATH)})
+- [RU: как договориться по цене с собственником квартиры в Дубае]({public_url(RU_NEGOTIATION_ARTICLE_PATH)})
+- [EN: how to negotiate an apartment price with an owner in Dubai]({public_url(EN_NEGOTIATION_ARTICLE_PATH)})
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
@@ -4669,6 +4815,8 @@ def sitemap_xml():
         (public_url(EN_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
         (public_url(RU_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
         (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
+        (public_url(RU_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
+        (public_url(EN_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
@@ -7283,6 +7431,17 @@ class Handler(BaseHTTPRequestHandler):
             status = query.get("lead", [""])[0]
             message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
             self.send_html(payment_article_page("en", message=message))
+        elif path == "/blog/how-to-negotiate-apartment-price-with-owner-dubai":
+            target = RU_NEGOTIATION_ARTICLE_PATH if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else EN_NEGOTIATION_ARTICLE_PATH
+            self.redirect(target)
+        elif path == RU_NEGOTIATION_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Спасибо. Александр свяжется с вами лично." if status == "success" else ("Укажите телефон, WhatsApp или Telegram." if status == "missing" else "")
+            self.send_html(negotiation_article_page("ru", message=message))
+        elif path == EN_NEGOTIATION_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
+            self.send_html(negotiation_article_page("en", message=message))
         elif path == "/lot":
             target_lang = "ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "en"
             try:
@@ -7496,15 +7655,30 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/ru/blog/lead", "/en/blog/lead"):
             form = parse_form(self)
             lang = "en" if path.startswith("/en/") else "ru"
-            article_path = EN_PAYMENT_ARTICLE_PATH if lang == "en" else RU_PAYMENT_ARTICLE_PATH
+            article_key = form_value(form, "article").strip()
+            article_config = {
+                "payment-default": {
+                    "path": EN_PAYMENT_ARTICLE_PATH if lang == "en" else RU_PAYMENT_ARTICLE_PATH,
+                    "label": "Missed off-plan property payment in Dubai" if lang == "en" else "Просрочка платежа за квартиру в Дубае",
+                },
+                "price-negotiation": {
+                    "path": EN_NEGOTIATION_ARTICLE_PATH if lang == "en" else RU_NEGOTIATION_ARTICLE_PATH,
+                    "label": "How to negotiate an apartment price in Dubai" if lang == "en" else "Как договориться по цене с собственником квартиры в Дубае",
+                },
+            }.get(article_key)
+            if not article_config:
+                article_config = {
+                    "path": EN_PAYMENT_ARTICLE_PATH if lang == "en" else RU_PAYMENT_ARTICLE_PATH,
+                    "label": "Missed off-plan property payment in Dubai" if lang == "en" else "Просрочка платежа за квартиру в Дубае",
+                }
+            article_path = article_config["path"]
             name = form_value(form, "name").strip()
             contact = form_value(form, "contact").strip()
             message = form_value(form, "message").strip()
             if not contact:
                 self.redirect(f"{article_path}?lead=missing#consultation")
                 return
-            article_label = "Missed off-plan property payment in Dubai" if lang == "en" else "Просрочка платежа за квартиру в Дубае"
-            full_message = f"Статья: {article_label}\n{message}".strip()
+            full_message = f"Статья: {article_config['label']}\n{message}".strip()
             create_web_lead(None, name, contact, full_message, source="Блог")
             self.redirect(f"{article_path}?lead=success#consultation")
             return
