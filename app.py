@@ -2868,18 +2868,77 @@ def preferred_public_language(accept_language):
     return "en"
 
 
-def seo_description_for_project(project):
-    parts = [
-        f"{project['rooms']} в {project['building']}, {project['district']}",
-        f"цена {money(project['price'])} AED",
-    ]
+def localized_project_value(value, lang="ru"):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    translations_en = {
+        "высокий": "High",
+        "низкий": "Low",
+        "средний": "Middle",
+        "свободно": "Vacant",
+        "в аренде": "Rented",
+        "арендовано": "Rented",
+        "меблировано": "Furnished",
+        "меблированная": "Furnished",
+        "меблированное": "Furnished",
+        "без мебели": "Unfurnished",
+        "немеблировано": "Unfurnished",
+        "немеблированная": "Unfurnished",
+        "немеблированное": "Unfurnished",
+        "да": "Yes",
+        "нет": "No",
+        "квартира": "Apartment",
+        "вилла": "Villa",
+        "таунхаус": "Townhouse",
+    }
+    translations_ru = {
+        "high": "Высокий",
+        "low": "Низкий",
+        "middle": "Средний",
+        "vacant": "Свободно",
+        "rented": "В аренде",
+        "furnished": "Меблировано",
+        "unfurnished": "Без мебели",
+        "yes": "Да",
+        "no": "Нет",
+        "apartment": "Квартира",
+        "villa": "Вилла",
+        "townhouse": "Таунхаус",
+    }
+    mapping = translations_en if lang == "en" else translations_ru
+    return mapping.get(value.lower(), value)
+
+
+def project_display_name(project, lang="ru"):
+    rooms = localized_project_value(project["rooms"], lang)
+    category = localized_project_value(project["category"], lang)
+    building = str(project["building"] or "").strip()
+    district = str(project["district"] or "").strip()
+    location = ", ".join(part for part in (building, district) if part)
+    if lang == "en":
+        property_type = category.lower() if category else "property"
+        prefix = " ".join(part for part in (rooms, property_type) if part)
+        return f"{prefix} in {location}" if location else prefix or f"Dubai property lot #{project['id']}"
+    prefix = " ".join(part for part in (category, rooms) if part)
+    return f"{prefix} в {location}" if location else prefix or f"Лот недвижимости в Дубае #{project['id']}"
+
+
+def seo_description_for_project(project, lang="ru"):
+    display_name = project_display_name(project, lang)
+    if lang == "en":
+        parts = [display_name, f"listed for {money(project['price'])} AED"]
+    else:
+        parts = [display_name, f"цена {money(project['price'])} AED"]
     if project["market_price"]:
         discount = pct_below(project["price"], project["market_price"])
         if discount and discount > 0:
-            parts.append(f"ниже рынка на {discount}%")
+            parts.append(f"{discount}% below market" if lang == "en" else f"ниже рынка на {discount}%")
     if project["distress"]:
         parts.append("distress deal")
-    return "Лот недвижимости в Дубае ниже рынка: " + ", ".join(parts) + ". Оставьте заявку, и @roi_counter свяжется с вами."
+    if lang == "en":
+        return "Dubai property below market: " + ", ".join(parts) + ". View details and request a consultation from a licensed Dubai broker."
+    return "Недвижимость в Дубае ниже рынка: " + ", ".join(parts) + ". Посмотрите детали и оставьте заявку лицензированному брокеру."
 
 
 def app_layout(
@@ -3056,11 +3115,28 @@ def app_layout(
     }});
   }})();
   </script>"""
+    footer_html = ""
+    if not noindex:
+        catalog_path = "/en/" if lang == "en" else "/ru/"
+        guide_path = "/en/below-market-property-dubai" if lang == "en" else "/ru/nedvizhimost-v-dubae-nizhe-rynka"
+        blog_path = EN_BLOG_PATH if lang == "en" else RU_BLOG_PATH
+        footer_html = f"""
+  <footer class="public-footer">
+    <strong>Below Market UAE</strong>
+    <nav aria-label="{'Footer navigation' if lang == 'en' else 'Навигация в подвале'}">
+      <a href="{catalog_path}">{'Catalog' if lang == 'en' else 'Каталог'}</a>
+      <a href="{guide_path}">{'Below-market guide' if lang == 'en' else 'Гид по объектам ниже рынка'}</a>
+      <a href="{blog_path}">{'Blog' if lang == 'en' else 'Блог'}</a>
+      <a href="https://t.me/{escape(BOT_USERNAME)}">Telegram</a>
+      <a href="https://t.me/roi_counter">{'Contact broker' if lang == 'en' else 'Связаться с брокером'}</a>
+    </nav>
+  </footer>"""
     return f"""<!doctype html>
 <html lang="{escape(lang)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/assets/watermark-logo.png" type="image/png">
   {('<meta name="robots" content="noindex, nofollow">' if noindex else '')}
   <title>{escape(title)}</title>
   <meta name="description" content="{escape(description)}">
@@ -3083,6 +3159,7 @@ def app_layout(
     {f'<div class="notice">{escape(message)}</div>' if message else ''}
     {content}
   </main>
+  {footer_html}
   {event_script}
 </body>
 </html>"""
@@ -3273,19 +3350,20 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
 
 def app_project_card(project, lot_path="/app/lot", lang="ru"):
     cover = project_cover(project["id"])
+    display_name = project_display_name(project, lang)
     deal_tags = app_deal_tags(project, lang=lang)
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
     href = f"{lot_path}?id={project['id']}" if lot_path else lot_public_path(project, lang)
     return f"""
     <a class="lot-card" href="{escape(href)}">
-      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="">' if cover else escape(photo_placeholder)}</div>
+      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="{escape(display_name)}" loading="lazy">' if cover else escape(photo_placeholder)}</div>
       <div class="lot-body">
-        <div class="lot-title"><span>{escape(project['title'])}</span><span class="lot-price">{money(project['price'])} AED</span></div>
+        <div class="lot-title"><span>{escape(display_name)}</span><span class="lot-price">{money(project['price'])} AED</span></div>
         <div>{escape(project['building'])}<br><span class="muted">{escape(project['district'])}</span></div>
         <div class="lot-meta">
-          <span>{escape(project['category'])}</span>
-          <span>{escape(project['rooms'])}</span>
+          <span>{escape(localized_project_value(project['category'], lang))}</span>
+          <span>{escape(localized_project_value(project['rooms'], lang))}</span>
           <span>{escape(project['area'])}</span>
           {deal_labels}
         </div>
@@ -3315,6 +3393,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
     if not project or project["status"] != "active":
         fallback_message = "Lot not found or no longer active." if lang == "en" else "Лот не найден или больше не актуален."
         return app_projects_page(message=fallback_message, base_path=base_path, lang=lang)
+    display_name = project_display_name(project, lang)
     is_public_catalog = base_path in ("", "/ru", "/en")
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
     lead_path = f"{base_path}/lead" if base_path in ("/ru", "/en", "/app") else "/lead"
@@ -3326,18 +3405,20 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         lot_path = f"/lot?id={project['id']}"
     share_url = f"{PUBLIC_BASE_URL}{lot_path}" if PUBLIC_BASE_URL else lot_path
     share_text = (
-        f"Below-market Dubai property lot: {project['title']}"
+        f"Below-market Dubai property: {display_name}"
         if lang == "en"
-        else f"Лот недвижимости в Дубае ниже рынка: {project['title']}"
+        else f"Недвижимость в Дубае ниже рынка: {display_name}"
     )
     media = get_project_media(project_id)
     gallery_items = []
-    for item in media:
+    for index, item in enumerate(media):
         src = app_media_path(item["file_name"])
         if item["mime_type"].startswith("video/"):
-            gallery_items.append(f'<div class="gallery-item"><video src="{escape(src)}" controls playsinline></video></div>')
+            gallery_items.append(f'<div class="gallery-item"><video src="{escape(src)}" controls playsinline aria-label="{escape(display_name)}"></video></div>')
         else:
-            gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt=""></div>')
+            loading = "eager" if index == 0 else "lazy"
+            priority = ' fetchpriority="high"' if index == 0 else ""
+            gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt="{escape(display_name)} - {index + 1}" loading="{loading}"{priority}></div>')
     labels = {
         "category": "Category" if lang == "en" else "Категория",
         "district": "Area" if lang == "en" else "Район",
@@ -3357,16 +3438,16 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         "below_original": "Below original price" if lang == "en" else "Ниже original price",
     }
     facts = [
-        (labels["category"], project["category"]),
+        (labels["category"], localized_project_value(project["category"], lang)),
         (labels["district"], project["district"]),
         (labels["building"], project["building"]),
-        (labels["rooms"], project["rooms"]),
-        (labels["bathrooms"], project["bathrooms"]),
-        (labels["floor"], project["floor_level"]),
-        (labels["parking"], project["parking"]),
-        (labels["status"], project["availability"]),
-        (labels["furnishing"], project["furnishing"]),
-        (labels["balcony"], project["balcony"]),
+        (labels["rooms"], localized_project_value(project["rooms"], lang)),
+        (labels["bathrooms"], localized_project_value(project["bathrooms"], lang)),
+        (labels["floor"], localized_project_value(project["floor_level"], lang)),
+        (labels["parking"], localized_project_value(project["parking"], lang)),
+        (labels["status"], localized_project_value(project["availability"], lang)),
+        (labels["furnishing"], localized_project_value(project["furnishing"], lang)),
+        (labels["balcony"], localized_project_value(project["balcony"], lang)),
         (labels["area"], project["area"]),
     ]
     fact_html = "".join(
@@ -3407,6 +3488,55 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
           </div>
         </div>
         """
+    with db() as conn:
+        related_projects = conn.execute(
+            """
+            select * from projects
+            where status='active' and id != ?
+            order by case when district = ? then 0 else 1 end, updated_at desc, id desc
+            limit 3
+            """,
+            (project["id"], project["district"]),
+        ).fetchall()
+    related_cards = "".join(app_project_card(item, None, lang=lang) for item in related_projects)
+    related_heading = "Similar below-market properties" if lang == "en" else "Похожие лоты ниже рынка"
+    discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+    availability = localized_project_value(project["availability"], lang)
+    floor_level = localized_project_value(project["floor_level"], lang)
+    raw_description = str(project["description"] or "").strip()
+    visible_description = "" if lang == "en" and re.search(r"[А-Яа-яЁё]", raw_description) else raw_description
+    if lang == "en":
+        market_sentence = (
+            f"The asking price is {discount}% below the stated average market price of {money(project['market_price'])} AED."
+            if discount and discount > 0
+            else "The asking price should be compared with current transactions and similar units in the same building."
+        )
+        distress_sentence = " The lot is marked as a distress opportunity." if project["distress"] else ""
+        lot_context = (
+            f"This {display_name} is offered for {money(project['price'])} AED. "
+            f"The listed area is {escape(project['area']) if project['area'] else 'available on request'}"
+            f"{f', availability is {escape(availability.lower())}' if availability else ''}"
+            f"{f', and the floor level is {escape(floor_level.lower())}' if floor_level else ''}. "
+            f"{market_sentence}{distress_sentence}"
+        )
+        context_heading = f"About this property in {project['district'] or 'Dubai'}"
+        context_note = "Property details, availability, and price can change. Request an updated check before making a purchase decision."
+    else:
+        market_sentence = (
+            f"Цена предложения на {discount}% ниже указанной средней цены рынка {money(project['market_price'])} AED."
+            if discount and discount > 0
+            else "Цену предложения стоит сравнить с актуальными сделками и похожими объектами в этом здании."
+        )
+        distress_sentence = " Лот отмечен как distress-предложение." if project["distress"] else ""
+        lot_context = (
+            f"{display_name} предлагается по цене {money(project['price'])} AED. "
+            f"Заявленная площадь — {escape(project['area']) if project['area'] else 'по запросу'}"
+            f"{f', статус — {escape(availability.lower())}' if availability else ''}"
+            f"{f', уровень этажа — {escape(floor_level.lower())}' if floor_level else ''}. "
+            f"{market_sentence}{distress_sentence}"
+        )
+        context_heading = f"Об этом объекте в районе {project['district'] or 'Дубай'}"
+        context_note = "Цена, доступность и характеристики объекта могут меняться. Перед покупкой запросите актуальную проверку лота."
     content = f"""
     {language_switch}
     <a class="back-link" href="{escape(root_path)}">← {escape(back_label)}</a>
@@ -3415,11 +3545,11 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
       <aside class="detail-panel">
         <div>
           <div class="app-brand">{escape(lot_label)} #{project['id']}</div>
-          <h1>{escape(project['title'])}</h1>
+          <h1>{escape(display_name)}</h1>
         </div>
         <div class="detail-price">{money(project['price'])} AED</div>
         <div class="facts">{fact_html}</div>
-        {f'<p>{escape(project["description"])}</p>' if project["description"] else ''}
+        {f'<p>{escape(visible_description)}</p>' if visible_description else ''}
         <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ {escape(share_label)}</button>
         <form class="lead-form" method="post" action="{escape(lead_path)}">
           <input type="hidden" name="project_id" value="{project['id']}">
@@ -3432,14 +3562,91 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         </form>
       </aside>
     </section>
+    <section class="lot-seo-copy">
+      <h2>{escape(context_heading)}</h2>
+      <p>{lot_context}</p>
+      <p>{escape(context_note)}</p>
+    </section>
+    {f'<section class="related-lots"><h2>{escape(related_heading)}</h2><div class="lot-grid">{related_cards}</div></section>' if related_cards else ''}
     """
     cover = project_cover(project["id"])
-    title = (
-        f"{project['title']} - below-market property in Dubai | Below Market UAE"
-        if lang == "en"
-        else f"{project['title']} - недвижимость в Дубае ниже рынка | Below Market UAE"
-    )
     canonical_path = lot_public_path(project, lang) if base_path in ("/ru", "/en") else f"/lot?id={project['id']}"
+    canonical_url = public_url(canonical_path)
+    description = seo_description_for_project(project, lang)
+    short_name = " ".join(
+        part for part in (
+            localized_project_value(project["rooms"], lang),
+            ("in" if lang == "en" else "в") if project["building"] or project["district"] else "",
+            project["building"] or project["district"],
+        )
+        if part
+    )
+    title = (
+        f"{short_name} below market | Below Market UAE"
+        if lang == "en"
+        else f"{short_name} ниже рынка | Below Market UAE"
+    )
+    image_urls = [public_url(app_media_path(item["file_name"])) for item in media if item["mime_type"].startswith("image/")]
+    property_entity = {
+        "@type": "Accommodation",
+        "name": display_name,
+        "description": description,
+        "address": {
+            "@type": "PostalAddress",
+            "streetAddress": project["building"] or "",
+            "addressLocality": project["district"] or "Dubai",
+            "addressRegion": "Dubai",
+            "addressCountry": "AE",
+        },
+        "offers": {
+            "@type": "Offer",
+            "price": str(project["price"]),
+            "priceCurrency": "AED",
+            "availability": "https://schema.org/InStock",
+            "url": canonical_url,
+            "seller": {"@type": "RealEstateAgent", "name": "Below Market UAE", "url": public_url("/")},
+        },
+    }
+    area_match = re.search(r"[\d.,]+", str(project["area"] or ""))
+    if area_match:
+        property_entity["floorSize"] = {
+            "@type": "QuantitativeValue",
+            "value": area_match.group(0).replace(",", ""),
+            "unitText": "SQFT",
+        }
+    structured_data = [
+        {
+            "@context": "https://schema.org",
+            "@type": "RealEstateListing",
+            "@id": f"{canonical_url}#listing",
+            "url": canonical_url,
+            "name": display_name,
+            "description": description,
+            "datePosted": (project["created_at"] or "")[:10],
+            "dateModified": (project["updated_at"] or project["created_at"] or "")[:10],
+            "inLanguage": lang,
+            "image": image_urls,
+            "mainEntity": property_entity,
+            "publisher": {
+                "@type": "RealEstateAgent",
+                "name": "Below Market UAE",
+                "employee": {
+                    "@type": "Person",
+                    "name": "Aleksandr Vinogradov",
+                    "jobTitle": "Licensed Real Estate Broker in Dubai",
+                    "identifier": "Broker No. 88673",
+                },
+            },
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(root_path)},
+                {"@type": "ListItem", "position": 2, "name": display_name, "item": canonical_url},
+            ],
+        },
+    ]
     return app_layout(
         title,
         content,
@@ -3447,12 +3654,13 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         catalog_event="catalog_lot_view",
         project_id=project["id"],
         project=project,
-        description=seo_description_for_project(project),
-        canonical_url=public_url(canonical_path),
+        description=description,
+        canonical_url=canonical_url,
         og_image=cover,
         noindex=not is_public_catalog,
         lang=lang,
         alternate_urls=alternates,
+        structured_data=structured_data,
     )
 
 
@@ -4442,32 +4650,47 @@ def sitemap_xml():
             order by updated_at desc, id desc
             """
         ).fetchall()
+    catalog_lastmod = max(
+        ((project["updated_at"] or project["created_at"] or BLOG_PUBLISHED_DATE)[:10] for project in projects),
+        default=BLOG_PUBLISHED_DATE,
+    )
+    def language_links(ru_path, en_path, default_path):
+        return [
+            ("ru", public_url(ru_path)),
+            ("en", public_url(en_path)),
+            ("x-default", public_url(default_path)),
+        ]
     urls = [
-        (public_url("/ru/"), now_local().date().isoformat(), "daily", "1.0"),
-        (public_url("/en/"), now_local().date().isoformat(), "daily", "1.0"),
-        (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), now_local().date().isoformat(), "weekly", "0.9"),
-        (public_url("/en/below-market-property-dubai"), now_local().date().isoformat(), "weekly", "0.9"),
-        (public_url(RU_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8"),
-        (public_url(EN_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8"),
-        (public_url(RU_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8"),
-        (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8"),
+        (public_url("/ru/"), catalog_lastmod, "daily", "1.0", language_links("/ru/", "/en/", "/")),
+        (public_url("/en/"), catalog_lastmod, "daily", "1.0", language_links("/ru/", "/en/", "/")),
+        (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), BLOG_PUBLISHED_DATE, "weekly", "0.9", language_links("/ru/nedvizhimost-v-dubae-nizhe-rynka", "/en/below-market-property-dubai", "/below-market-property-dubai")),
+        (public_url("/en/below-market-property-dubai"), BLOG_PUBLISHED_DATE, "weekly", "0.9", language_links("/ru/nedvizhimost-v-dubae-nizhe-rynka", "/en/below-market-property-dubai", "/below-market-property-dubai")),
+        (public_url(RU_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
+        (public_url(EN_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
+        (public_url(RU_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
+        (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
-        urls.append((public_url(lot_public_path(project, "ru")), lastmod, "daily", "0.8"))
-        urls.append((public_url(lot_public_path(project, "en")), lastmod, "daily", "0.8"))
+        links = language_links(lot_public_path(project, "ru"), lot_public_path(project, "en"), f"/lot?id={project['id']}")
+        urls.append((public_url(lot_public_path(project, "ru")), lastmod, "daily", "0.8", links))
+        urls.append((public_url(lot_public_path(project, "en")), lastmod, "daily", "0.8", links))
     items = "\n".join(
         "  <url>\n"
         f"    <loc>{html.escape(loc)}</loc>\n"
         f"    <lastmod>{html.escape(lastmod)}</lastmod>\n"
         f"    <changefreq>{changefreq}</changefreq>\n"
         f"    <priority>{priority}</priority>\n"
-        "  </url>"
-        for loc, lastmod, changefreq, priority in urls
+        + "".join(
+            f'    <xhtml:link rel="alternate" hreflang="{html.escape(code)}" href="{html.escape(href)}" />\n'
+            for code, href in alternates
+        )
+        + "  </url>"
+        for loc, lastmod, changefreq, priority, alternates in urls
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
         f"{items}\n"
         "</urlset>\n"
     )
@@ -4797,6 +5020,10 @@ APP_CSS = """
 body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
 a { color:inherit; }
 .app-shell { max-width:1180px; margin:0 auto; padding:18px 18px 48px; }
+.public-footer { max-width:1180px; margin:0 auto; padding:22px 18px 34px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:18px; color:var(--muted); }
+.public-footer strong { color:var(--text); }
+.public-footer nav { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px 18px; }
+.public-footer a { color:var(--accent); text-decoration:none; font-weight:750; }
 .app-hero { display:grid; gap:8px; padding:18px 0 16px; }
 .app-brand { font-size:13px; color:var(--gold); font-weight:800; text-transform:uppercase; letter-spacing:.8px; }
 .app-hero h1 { margin:0; font-size:clamp(28px,5vw,44px); line-height:1.06; letter-spacing:0; max-width:780px; }
@@ -4823,6 +5050,10 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .detail-panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:14px; position:sticky; top:14px; }
 .detail-panel h1 { margin:0; font-size:26px; line-height:1.12; }
 .detail-price { font-size:24px; color:var(--accent); font-weight:900; }
+.lot-seo-copy, .related-lots { margin-top:18px; background:#fff; border:1px solid var(--line); border-radius:8px; padding:20px; display:grid; gap:10px; }
+.lot-seo-copy h2, .related-lots h2 { margin:0; font-size:26px; line-height:1.15; }
+.lot-seo-copy p { margin:0; max-width:900px; color:var(--muted); }
+.related-lots .lot-grid { margin-top:4px; }
 .facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .fact { padding:10px; background:#f8faf8; border:1px solid var(--line); border-radius:7px; }
 .fact.deal-tag { background:#e7f2ec; border-color:#bcd8c9; color:#1f6b4d; }
@@ -4908,6 +5139,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 @media (max-width:900px) { .app-shell { padding:14px 12px 36px; } .app-filters { position:static; grid-template-columns:1fr 1fr; } .app-filters input:first-child { grid-column:1 / -1; } .lot-grid { grid-template-columns:1fr; } .lot-detail { grid-template-columns:1fr; } .detail-panel { position:static; } }
 @media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl, .blog-grid, .article-layout, .article-lead { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } .article-author { position:static; } }
 @media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
+@media (max-width:520px) { .public-footer { flex-direction:column; } .public-footer nav { justify-content:flex-start; flex-direction:column; } }
 """
 
 
@@ -6958,7 +7190,8 @@ class Handler(BaseHTTPRequestHandler):
             for key, value in headers.items():
                 self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(encoded)
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
 
     def send_text(self, body, content_type="text/plain; charset=utf-8", status=200):
         encoded = body.encode()
@@ -6966,7 +7199,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
 
     def send_bytes(self, data, content_type, filename):
         self.send_response(200)
@@ -6974,7 +7208,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def redirect(self, location, status=303):
         self.send_response(status)
@@ -7177,8 +7412,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/assets/"):
             self.serve_asset(path.removeprefix("/assets/"), include_body=False)
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.do_GET()
 
     def serve_media(self, name, include_body=True):
         safe = Path(urllib.parse.unquote(name)).name
