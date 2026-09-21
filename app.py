@@ -3918,7 +3918,7 @@ def below_market_en_page():
         <div class="broker-card">
           <h3>Below Market UAE broker</h3>
           <dl>
-            <div><dt>Name</dt><dd>Aleksandr Vinogradov / Александр Виноградов</dd></div>
+            <div><dt>Name</dt><dd>Aleksandr Vinogradov</dd></div>
             <div><dt>Status</dt><dd>Licensed Real Estate Broker in Dubai</dd></div>
             <div><dt>Broker number</dt><dd>88673</dd></div>
             <div><dt>Agency</dt><dd>Blackberry Real Estate L.L.C</dd></div>
@@ -4094,6 +4094,9 @@ def article_lead_form(lang="ru"):
       var details = {{article_slug:'payment-default', article_language:{json.dumps(lang)}}};
       window.dataLayer = window.dataLayer || [];
       window.dataLayer.push(Object.assign({{event:'article_view'}}, details));
+      if (typeof window.ym === 'function' && {json.dumps(bool(YANDEX_METRIKA_ID))}) {{
+        try {{ window.ym(Number({json.dumps(YANDEX_METRIKA_ID or '0')}), 'reachGoal', 'article_view', details); }} catch (e) {{}}
+      }}
       var form = document.querySelector('.article-lead-form');
       if (!form) return;
       form.addEventListener('submit', function() {{
@@ -4169,6 +4172,7 @@ def payment_article_page(lang="ru", message=""):
             "@type": "Person",
             "name": "Aleksandr Vinogradov",
             "alternateName": "Александр Виноградов",
+            "image": public_url("/assets/aleksandr-vinogradov.jpg"),
             "jobTitle": "Licensed Real Estate Broker in Dubai",
             "identifier": "Broker No. 88673",
             "sameAs": ["https://t.me/roi_counter"],
@@ -4266,7 +4270,7 @@ def payment_article_page(lang="ru", message=""):
       <header class="article-header">
         <div class="app-brand">{'Dubai off-plan property' if is_en else 'Off-plan недвижимость Дубая'}</div>
         <h1>{escape(h1)}</h1>
-        <div class="article-byline"><span>{'By' if is_en else 'Автор'}: Александр Виноградов</span><span>{BLOG_PUBLISHED_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
+        <div class="article-byline"><span>{'By: Aleksandr Vinogradov' if is_en else 'Автор: Александр Виноградов'}</span><span>{BLOG_PUBLISHED_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
       </header>
       <div class="article-layout">
         <div class="article-body">
@@ -4275,8 +4279,9 @@ def payment_article_page(lang="ru", message=""):
           <p class="article-disclaimer">{'This material is for general information and is not legal advice. The outcome depends on the specific SPA and circumstances. Seek advice from a Dubai real estate lawyer if you have received a formal notice.' if is_en else 'Материал носит информационный характер и не является юридической консультацией. Решение зависит от условий конкретного SPA и обстоятельств. При получении официального уведомления рекомендуется обратиться к юристу по недвижимости в Дубае.'}</p>
         </div>
         <aside class="article-author">
+          <img class="article-author-photo" src="/assets/aleksandr-vinogradov.jpg" alt="{'Aleksandr Vinogradov, licensed real estate broker in Dubai' if is_en else 'Александр Виноградов, лицензированный брокер по недвижимости в Дубае'}" width="112" height="112" loading="lazy">
           <div class="app-brand">{'Author' if is_en else 'Автор статьи'}</div>
-          <h2>Александр Виноградов</h2>
+          <h2>{'Aleksandr Vinogradov' if is_en else 'Александр Виноградов'}</h2>
           <p>{escape(author_intro)}</p>
           <dl><div><dt>{'Status' if is_en else 'Статус'}</dt><dd>{'Licensed Dubai real estate broker' if is_en else 'Лицензированный брокер в Дубае'}</dd></div><div><dt>{'Broker number' if is_en else 'Номер брокера'}</dt><dd>88673</dd></div><div><dt>{'Contact' if is_en else 'Контакт'}</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a></dd></div></dl>
         </aside>
@@ -4299,6 +4304,7 @@ def payment_article_page(lang="ru", message=""):
         alternate_urls=alternates,
         keywords=article_schema["keywords"],
         og_type="article",
+        og_image=public_url("/assets/aleksandr-vinogradov.jpg"),
     )
 
 
@@ -4326,6 +4332,7 @@ def robots_txt():
         "Allow: /lot",
         "Allow: /llms.txt",
         "Allow: /media/",
+        "Allow: /assets/",
     ]
     ai_crawlers = [
         "OAI-SearchBot",
@@ -4886,6 +4893,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .article-source { padding-top:14px; border-top:1px solid var(--line); }
 .article-disclaimer { color:var(--muted); font-size:13px; }
 .article-author { position:sticky; top:14px; background:#f8faf8; border:1px solid var(--line); border-radius:8px; padding:18px; display:grid; gap:10px; }
+.article-author-photo { width:112px; height:112px; border-radius:50%; object-fit:cover; object-position:center 28%; border:3px solid #fff; box-shadow:0 0 0 1px var(--line); }
 .article-author h2, .article-author p, .article-author dl { margin:0; }
 .article-author p { color:var(--muted); }
 .article-author dl { display:grid; gap:8px; }
@@ -7104,6 +7112,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(app_project_page(project_id))
         elif path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"), include_body=True)
+        elif path.startswith("/assets/"):
+            self.serve_asset(path.removeprefix("/assets/"), include_body=True)
         elif not self.require_auth():
             return
         elif path == "/admin":
@@ -7164,6 +7174,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"), include_body=False)
+        elif path.startswith("/assets/"):
+            self.serve_asset(path.removeprefix("/assets/"), include_body=False)
         else:
             self.send_response(404)
             self.end_headers()
@@ -7179,6 +7191,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(target.stat().st_size))
+        self.end_headers()
+        if include_body:
+            with target.open("rb") as f:
+                shutil.copyfileobj(f, self.wfile)
+
+    def serve_asset(self, name, include_body=True):
+        safe = Path(urllib.parse.unquote(name)).name
+        target = APP_DIR / "assets" / safe
+        if not target.exists() or not target.is_file():
+            self.send_response(404)
+            self.end_headers()
+            return
+        mime = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(target.stat().st_size))
+        self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
         if include_body:
             with target.open("rb") as f:
