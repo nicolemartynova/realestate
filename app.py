@@ -2896,6 +2896,8 @@ def app_layout(
     structured_data=None,
     lang="ru",
     alternate_urls=None,
+    keywords="",
+    og_type="website",
 ):
     metrika_project = {}
     if project:
@@ -3062,9 +3064,10 @@ def app_layout(
   {('<meta name="robots" content="noindex, nofollow">' if noindex else '')}
   <title>{escape(title)}</title>
   <meta name="description" content="{escape(description)}">
+  {f'<meta name="keywords" content="{escape(keywords)}">' if keywords else ''}
   <link rel="canonical" href="{escape(canonical_url)}">
   {alternate_tags}
-  <meta property="og:type" content="website">
+  <meta property="og:type" content="{escape(og_type)}">
   <meta property="og:title" content="{escape(title)}">
   <meta property="og:description" content="{escape(description)}">
   <meta property="og:url" content="{escape(canonical_url)}">
@@ -3216,6 +3219,8 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         h1 = "Below-market property lots in Dubai"
         intro = "Choose an area, budget, and property format. Request details on a lot you like, and @roi_counter will contact you."
         guide_text = "How to find below-market property in Dubai: a guide by Below Market UAE"
+        blog_path = EN_BLOG_PATH
+        blog_text = "Dubai property insights"
         search_placeholder = "Area, building, or title"
         max_price_placeholder = "Price up to, AED"
         find_label = "Search"
@@ -3227,6 +3232,8 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         h1 = "Лоты недвижимости в Дубае ниже рынка"
         intro = "Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами."
         guide_text = "Как находить недвижимость в Дубае ниже рынка: guide от Below Market UAE"
+        blog_path = RU_BLOG_PATH
+        blog_text = "Блог о недвижимости Дубая"
         search_placeholder = "Район, здание или название"
         max_price_placeholder = "Цена до, AED"
         find_label = "Найти"
@@ -3239,7 +3246,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <div class="app-brand">Below Market Dubai</div>
       <h1>{escape(h1)}</h1>
       <p>{escape(intro)}</p>
-      <p><a href="{escape(guide_path)}">{escape(guide_text)}</a></p>
+      <p><a href="{escape(guide_path)}">{escape(guide_text)}</a> · <a href="{escape(blog_path)}">{escape(blog_text)}</a></p>
     </section>
     <form class="app-filters" method="get" action="{escape(root_path)}">
       <input name="q" value="{escape(search)}" placeholder="{escape(search_placeholder)}">
@@ -3947,6 +3954,354 @@ def below_market_en_page():
     )
 
 
+RU_BLOG_PATH = "/ru/blog/"
+EN_BLOG_PATH = "/en/blog/"
+RU_PAYMENT_ARTICLE_PATH = "/ru/blog/prosrochka-platezha-za-kvartiru-v-dubae"
+EN_PAYMENT_ARTICLE_PATH = "/en/blog/missed-off-plan-property-payment-dubai"
+BLOG_PUBLISHED_DATE = "2026-09-21"
+
+
+def blog_alternates():
+    return {
+        "ru": public_url(RU_BLOG_PATH),
+        "en": public_url(EN_BLOG_PATH),
+        "x-default": public_url("/blog"),
+    }
+
+
+def payment_article_alternates():
+    return {
+        "ru": public_url(RU_PAYMENT_ARTICLE_PATH),
+        "en": public_url(EN_PAYMENT_ARTICLE_PATH),
+        "x-default": public_url("/blog/missed-off-plan-property-payment-dubai"),
+    }
+
+
+def blog_index_page(lang="ru"):
+    lang = "en" if lang == "en" else "ru"
+    is_en = lang == "en"
+    path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
+    article_path = EN_PAYMENT_ARTICLE_PATH if is_en else RU_PAYMENT_ARTICLE_PATH
+    title = "Dubai Property Insights | Below Market UAE" if is_en else "Блог о недвижимости Дубая | Below Market UAE"
+    description = (
+        "Practical guidance on Dubai property, off-plan investments, payment plans, distress deals, and buying below market from a licensed Dubai broker."
+        if is_en
+        else "Практические статьи о недвижимости Дубая, покупке off-plan, платежных планах, distress deals и объектах ниже рынка от лицензированного брокера."
+    )
+    h1 = "Dubai property insights" if is_en else "Блог о недвижимости Дубая"
+    intro = (
+        "Practical explanations for buyers and investors: payment plans, off-plan risks, distress deals, resale strategies, and below-market opportunities."
+        if is_en
+        else "Практические материалы для покупателей и инвесторов: платежные планы, риски off-plan, distress deals, перепродажа и объекты ниже рынка."
+    )
+    article_title = (
+        "What to do if you cannot make an off-plan property payment in Dubai"
+        if is_en
+        else "Что делать, если вы не можете внести платеж за квартиру в Дубае"
+    )
+    article_summary = (
+        "How to contact the developer, assess a resale, understand the DLD notice procedure, and reduce the risk of contract termination."
+        if is_en
+        else "Как договориться с застройщиком, оценить перепродажу, разобраться в процедуре DLD и снизить риск расторжения договора."
+    )
+    read_label = "Read article" if is_en else "Читать статью"
+    catalog_label = "View current lots" if is_en else "Смотреть актуальные лоты"
+    structured_data = [
+        {
+            "@context": "https://schema.org",
+            "@type": "CollectionPage",
+            "name": h1,
+            "description": description,
+            "url": public_url(path),
+            "inLanguage": "en" if is_en else "ru",
+            "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
+            "hasPart": [{"@type": "Article", "headline": article_title, "url": public_url(article_path)}],
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(f"/{lang}/")},
+                {"@type": "ListItem", "position": 2, "name": "Blog" if is_en else "Блог", "item": public_url(path)},
+            ],
+        },
+    ]
+    alternates = blog_alternates()
+    content = f"""
+    <article class="seo-page blog-index">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>/</span><span>{'Blog' if is_en else 'Блог'}</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          {f'<a href="{escape(alternates["ru"])}">RU</a><span>EN</span>' if is_en else f'<span>RU</span><a href="{escape(alternates["en"])}">EN</a>'}
+        </div>
+      </div>
+      <section class="seo-hero">
+        <div class="app-brand">Below Market UAE</div>
+        <h1>{escape(h1)}</h1>
+        <p>{escape(intro)}</p>
+      </section>
+      <section class="blog-grid">
+        <article class="blog-card">
+          <div class="blog-card-meta">{BLOG_PUBLISHED_DATE} · {'Off-plan property' if is_en else 'Off-plan недвижимость'}</div>
+          <h2><a href="{escape(article_path)}">{escape(article_title)}</a></h2>
+          <p>{escape(article_summary)}</p>
+          <a class="app-button" href="{escape(article_path)}">{escape(read_label)}</a>
+        </article>
+      </section>
+      <section class="seo-cta">
+        <h2>{'Looking for a property below market?' if is_en else 'Ищете недвижимость ниже рынка?'}</h2>
+        <p>{'Browse current Dubai lots selected by Below Market UAE.' if is_en else 'Посмотрите актуальные лоты Дубая, отобранные Below Market UAE.'}</p>
+        <div class="seo-actions"><a class="app-button" href="/{lang}/">{escape(catalog_label)}</a></div>
+      </section>
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        description=description,
+        canonical_url=public_url(path),
+        structured_data=structured_data,
+        lang=lang,
+        alternate_urls=alternates,
+        keywords=(
+            "Dubai property blog, off-plan property Dubai, Dubai real estate investment, distress deals Dubai"
+            if is_en
+            else "блог о недвижимости Дубая, недвижимость off-plan Дубай, инвестиции в недвижимость Дубая, distress deals"
+        ),
+    )
+
+
+def article_lead_form(lang="ru"):
+    is_en = lang == "en"
+    return f"""
+    <section class="article-lead" id="consultation">
+      <div>
+        <div class="app-brand">{'Personal consultation' if is_en else 'Персональная консультация'}</div>
+        <h2>{'Need help with your property?' if is_en else 'Нужна помощь с объектом?'}</h2>
+        <p>{'Describe your situation. Alexander will review the details and contact you personally.' if is_en else 'Опишите вашу ситуацию. Александр изучит детали и свяжется с вами лично.'}</p>
+      </div>
+      <form class="lead-form article-lead-form" method="post" action="/{lang}/blog/lead">
+        <input type="hidden" name="article" value="payment-default">
+        <input name="name" required autocomplete="name" placeholder="{'Your name' if is_en else 'Ваше имя'}">
+        <input name="contact" required autocomplete="tel" placeholder="{'Phone, WhatsApp, or Telegram' if is_en else 'Телефон, WhatsApp или Telegram'}">
+        <textarea name="message" placeholder="{'Briefly describe your situation' if is_en else 'Кратко опишите вашу ситуацию'}"></textarea>
+        <button type="submit">💬 {'Request a consultation' if is_en else 'Получить консультацию'}</button>
+        <small>{'By submitting the form, you agree that we may contact you about your request.' if is_en else 'Отправляя форму, вы соглашаетесь на связь по вашему обращению.'}</small>
+      </form>
+    </section>
+    <script>
+    (function() {{
+      var details = {{article_slug:'payment-default', article_language:{json.dumps(lang)}}};
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({{event:'article_view'}}, details));
+      var form = document.querySelector('.article-lead-form');
+      if (!form) return;
+      form.addEventListener('submit', function() {{
+        window.dataLayer.push(Object.assign({{event:'lead_submit', lead_source:'blog'}}, details));
+        if (typeof window.ym === 'function' && {json.dumps(bool(YANDEX_METRIKA_ID))}) {{
+          try {{ window.ym(Number({json.dumps(YANDEX_METRIKA_ID or '0')}), 'reachGoal', 'lead_submit', details); }} catch (e) {{}}
+        }}
+      }});
+    }})();
+    </script>
+    """
+
+
+def payment_article_page(lang="ru", message=""):
+    lang = "en" if lang == "en" else "ru"
+    is_en = lang == "en"
+    path = EN_PAYMENT_ARTICLE_PATH if is_en else RU_PAYMENT_ARTICLE_PATH
+    blog_path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
+    alternates = payment_article_alternates()
+    title = (
+        "Missed off-plan property payment in Dubai: what to do | Below Market UAE"
+        if is_en
+        else "Просрочка платежа за квартиру в Дубае: что делать инвестору | Below Market UAE"
+    )
+    description = (
+        "What to do if you cannot make an off-plan property instalment in Dubai: developer negotiations, DLD notice procedure, resale options, and contract termination risks."
+        if is_en
+        else "Что делать, если вы не можете внести платеж за строящуюся квартиру в Дубае: переговоры с застройщиком, процедура DLD, перепродажа и риски расторжения договора."
+    )
+    h1 = (
+        "What to do if you cannot make an off-plan property payment in Dubai"
+        if is_en
+        else "Что делать, если вы не можете внести платеж за квартиру в Дубае"
+    )
+    faq = [
+        (
+            "Can a Dubai developer cancel an off-plan contract immediately after a missed payment?",
+            "Not automatically. For the statutory default procedure, the developer notifies Dubai Land Department, and DLD serves a 30-day notice requiring the buyer to perform or reach a settlement. Contractual consequences and penalties still depend on the SPA.",
+        ),
+        (
+            "Is the 30-day DLD period an interest-free payment extension?",
+            "No. It is a formal notice period under the default procedure, not a universal penalty-free grace period. The SPA and any written agreement with the developer determine payment and penalty terms.",
+        ),
+        (
+            "Can an off-plan property be resold before completion?",
+            "Often yes, but the SPA, developer rules, paid percentage, NOC requirements, transfer fees, and project demand must be checked first.",
+        ),
+    ] if is_en else [
+        (
+            "Может ли застройщик сразу расторгнуть договор после просрочки платежа?",
+            "Не автоматически. В рамках предусмотренной законом процедуры застройщик уведомляет Dubai Land Department, после чего DLD направляет покупателю 30-дневное уведомление для исполнения обязательств или достижения соглашения. Последствия и штрафы также зависят от SPA.",
+        ),
+        (
+            "Являются ли 30 дней от DLD бесплатной отсрочкой?",
+            "Нет. Это срок официального уведомления в процедуре нарушения обязательств, а не универсальная отсрочка без штрафов. Условия платежей и санкций определяются SPA и письменными договорённостями с застройщиком.",
+        ),
+        (
+            "Можно ли перепродать квартиру off-plan до завершения строительства?",
+            "Часто это возможно, но необходимо проверить SPA, правила застройщика, оплаченный процент, требования к NOC, комиссии и спрос на проект.",
+        ),
+    ]
+    article_schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": h1,
+        "description": description,
+        "url": public_url(path),
+        "mainEntityOfPage": public_url(path),
+        "datePublished": BLOG_PUBLISHED_DATE,
+        "dateModified": BLOG_PUBLISHED_DATE,
+        "inLanguage": lang,
+        "author": {
+            "@type": "Person",
+            "name": "Aleksandr Vinogradov",
+            "alternateName": "Александр Виноградов",
+            "jobTitle": "Licensed Real Estate Broker in Dubai",
+            "identifier": "Broker No. 88673",
+            "sameAs": ["https://t.me/roi_counter"],
+        },
+        "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
+        "about": ["Dubai off-plan property", "property payment default", "Dubai real estate"],
+        "keywords": (
+            "missed off-plan property payment Dubai, Dubai property payment default, cannot pay property instalment Dubai, sell off-plan property Dubai"
+            if is_en
+            else "просрочка платежа за квартиру в Дубае, нечем платить за квартиру в Дубае, продажа квартиры off-plan в Дубае, расторжение договора с застройщиком в Дубае"
+        ),
+    }
+    structured_data = [
+        article_schema,
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(f"/{lang}/")},
+                {"@type": "ListItem", "position": 2, "name": "Blog" if is_en else "Блог", "item": public_url(blog_path)},
+                {"@type": "ListItem", "position": 3, "name": h1, "item": public_url(path)},
+            ],
+        },
+        {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {"@type": "Question", "name": question, "acceptedAnswer": {"@type": "Answer", "text": answer}}
+                for question, answer in faq
+            ],
+        },
+    ]
+    faq_html = "".join(
+        f'<details><summary>{escape(question)}</summary><p>{escape(answer)}</p></details>'
+        for question, answer in faq
+    )
+    if is_en:
+        body = f"""
+        <p class="article-lead-text">Missing an instalment on an off-plan property in Dubai does not mean the developer can immediately take the unit away. However, the situation should not be ignored: the outcome depends on the SPA, construction progress, and how early the buyer acts.</p>
+        <p>Here is what to do when the next property payment is approaching and the required funds are not available.</p>
+        <h2>1. Contact the developer before the due date</h2>
+        <p>If payment is due in a month and you already know you cannot cover it, contact the developer first instead of waiting for a formal notice.</p>
+        <p>You can ask for:</p>
+        <ul><li>a revised payment date;</li><li>an individual payment schedule;</li><li>the instalment to be divided into smaller payments;</li><li>a temporary restructuring arrangement.</li></ul>
+        <p>A developer is not automatically required to approve an extension. The decision depends on the SPA and the developer's policy, so obtain every arrangement in writing.</p>
+        <h2>2. Do not ignore correspondence and notices</h2>
+        <p>Stay in contact and reply to official communication. If you can pay part of the amount, discuss a partial payment and document the agreed terms.</p>
+        <p>A partial payment does not by itself cure the breach, but it can demonstrate your intention to meet the obligation and strengthen your negotiating position.</p>
+        <aside class="article-note"><strong>Important: the DLD 30-day procedure</strong><p>Under Article 11 of Dubai Law No. 19 of 2017, a developer reporting an off-plan buyer's contractual default must notify Dubai Land Department. Once DLD verifies the breach, it serves a written 30-day notice requiring the buyer to perform or reach an amicable settlement. This is not a universal penalty-free grace period: contractual penalties and payment terms depend on the SPA.</p></aside>
+        <h2>3. Consider selling the property</h2>
+        <p>If additional time will still not be enough, assess a resale as early as possible.</p>
+        <p>Check whether:</p>
+        <ul><li>the SPA permits an assignment or resale;</li><li>the required percentage of the price has been paid;</li><li>the developer requires an NOC;</li><li>transfer or administration fees apply;</li><li>there is genuine demand for the project;</li><li>the expected selling price is realistic.</li></ul>
+        <p>The earlier the property reaches the market, the more time remains to find a buyer and complete the transfer. Selling at cost or with a limited discount can be preferable to contract termination and the loss of a substantial part of the invested funds.</p>
+        <h2>How to reduce the risk before buying</h2>
+        <p>Before signing an SPA, assess the entire payment schedule, not just the booking amount or first instalment. Include possible income delays, transaction costs, and a reserve for unforeseen circumstances.</p>
+        <p>The payment plan should match your real cash flow. Relying only on future price growth or a quick resale is risky.</p>
+        """
+        author_intro = "Over the past year, I have helped protect seven properties whose owners faced the risk of contract termination because of missed payments. I can review your SPA and payment schedule, assess negotiation or resale options, and suggest a practical course of action."
+        faq_title = "Frequently asked questions"
+        source_label = "Official source"
+    else:
+        body = f"""
+        <p class="article-lead-text">Просрочка платежа по строящейся недвижимости в Дубае не означает, что застройщик сразу заберёт квартиру. Но игнорировать ситуацию нельзя: последствия зависят от условий договора, стадии строительства и того, насколько быстро покупатель начал действовать.</p>
+        <p>Ниже расскажу, что можно предпринять, если приближается очередной платёж по объекту off-plan, а необходимой суммы пока нет.</p>
+        <h2>1. Свяжитесь с застройщиком заранее</h2>
+        <p>Если платёж должен быть внесён через месяц, но вы уже понимаете, что не сможете оплатить его вовремя, не ждите официального уведомления. Напишите застройщику первым и объясните ситуацию.</p>
+        <p>Можно запросить:</p>
+        <ul><li>перенос даты платежа;</li><li>индивидуальный график;</li><li>разделение платежа на несколько частей;</li><li>временную реструктуризацию задолженности.</li></ul>
+        <p>Застройщик не обязан согласовывать отсрочку автоматически. Решение зависит от договора и политики конкретной компании, поэтому любые договорённости необходимо получить в письменном виде.</p>
+        <h2>2. Не игнорируйте письма и уведомления</h2>
+        <p>Оставайтесь на связи с застройщиком и отвечайте на официальные обращения. Если можете внести часть суммы, обсудите частичную оплату и зафиксируйте её условия письменно.</p>
+        <p>Частичный платёж сам по себе не отменяет нарушение договора, но может показать готовность выполнять обязательства и усилить вашу позицию на переговорах.</p>
+        <aside class="article-note"><strong>Важно: как работает 30-дневная процедура DLD</strong><p>Согласно статье 11 Закона Дубая № 19 от 2017 года, при нарушении покупателем обязательств по off-plan договору застройщик уведомляет Dubai Land Department. После проверки DLD направляет покупателю письменное уведомление и предоставляет 30 дней для исполнения обязательств или достижения соглашения. Это не универсальная отсрочка без штрафов: условия платежей и санкций зависят от SPA.</p></aside>
+        <h2>3. Рассмотрите продажу объекта</h2>
+        <p>Если вы понимаете, что даже дополнительного времени не хватит, стоит как можно раньше оценить возможность перепродажи квартиры.</p>
+        <p>Для этого нужно проверить:</p>
+        <ul><li>допускает ли договор уступку прав;</li><li>какая часть стоимости уже оплачена;</li><li>требуется ли NOC от застройщика;</li><li>какие комиссии предусмотрены;</li><li>есть ли спрос на объект;</li><li>по какой цене его реально можно продать.</li></ul>
+        <p>Чем раньше объект выходит на рынок, тем больше времени остаётся на поиск покупателя и оформление сделки. Иногда разумнее продать квартиру без прибыли или с небольшим дисконтом, чем допустить расторжение договора и потерять существенную часть вложенных средств.</p>
+        <h2>Как снизить риск ещё до покупки</h2>
+        <p>До подписания договора важно оценить не только первоначальный взнос, но и весь график платежей, возможные задержки доходов, расходы на оформление и резерв на непредвиденные обстоятельства.</p>
+        <p>Платёжный план должен соответствовать вашему реальному денежному потоку. Рассчитывать исключительно на будущий рост цены или быструю перепродажу рискованно.</p>
+        """
+        author_intro = "За последний год я помог сохранить семь квартир, владельцы которых столкнулись с риском расторжения договора из-за просроченных платежей. Я могу изучить ваш договор и график платежей, оценить варианты переговоров с застройщиком или перепродажи объекта и предложить возможный план действий."
+        faq_title = "Частые вопросы"
+        source_label = "Официальный источник"
+    content = f"""
+    <article class="seo-page article-page">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>/</span><a href="{escape(blog_path)}">{'Blog' if is_en else 'Блог'}</a><span>/</span><span>{'Payment default' if is_en else 'Просрочка платежа'}</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          {f'<a href="{escape(alternates["ru"])}">RU</a><span>EN</span>' if is_en else f'<span>RU</span><a href="{escape(alternates["en"])}">EN</a>'}
+        </div>
+      </div>
+      <header class="article-header">
+        <div class="app-brand">{'Dubai off-plan property' if is_en else 'Off-plan недвижимость Дубая'}</div>
+        <h1>{escape(h1)}</h1>
+        <div class="article-byline"><span>{'By' if is_en else 'Автор'}: Александр Виноградов</span><span>{BLOG_PUBLISHED_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
+      </header>
+      <div class="article-layout">
+        <div class="article-body">
+          {body}
+          <p class="article-source"><strong>{escape(source_label)}:</strong> <a href="https://dlp.dubai.gov.ae/Legislation%20Reference/2017/Law%20No.%20%2819%29%20of%202017%20Amending%20Law%20No.%20%2813%29%20of%202008%20Regulating%20the%20Interim%20Real%20Property%20Register%20in%20the%20Emirate%20of%20Dubai.html" rel="nofollow noopener" target="_blank">Dubai Law No. 19 of 2017, Article 11</a>.</p>
+          <p class="article-disclaimer">{'This material is for general information and is not legal advice. The outcome depends on the specific SPA and circumstances. Seek advice from a Dubai real estate lawyer if you have received a formal notice.' if is_en else 'Материал носит информационный характер и не является юридической консультацией. Решение зависит от условий конкретного SPA и обстоятельств. При получении официального уведомления рекомендуется обратиться к юристу по недвижимости в Дубае.'}</p>
+        </div>
+        <aside class="article-author">
+          <div class="app-brand">{'Author' if is_en else 'Автор статьи'}</div>
+          <h2>Александр Виноградов</h2>
+          <p>{escape(author_intro)}</p>
+          <dl><div><dt>{'Status' if is_en else 'Статус'}</dt><dd>{'Licensed Dubai real estate broker' if is_en else 'Лицензированный брокер в Дубае'}</dd></div><div><dt>{'Broker number' if is_en else 'Номер брокера'}</dt><dd>88673</dd></div><div><dt>{'Contact' if is_en else 'Контакт'}</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a></dd></div></dl>
+        </aside>
+      </div>
+      <section class="seo-section">
+        <h2>{escape(faq_title)}</h2>
+        <div class="faq-list">{faq_html}</div>
+      </section>
+      {article_lead_form(lang)}
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        message=message,
+        description=description,
+        canonical_url=public_url(path),
+        structured_data=structured_data,
+        lang=lang,
+        alternate_urls=alternates,
+        keywords=article_schema["keywords"],
+        og_type="article",
+    )
+
+
 def robots_txt():
     sitemap_url = public_url("/sitemap.xml")
     llms_url = public_url("/llms.txt")
@@ -4053,6 +4408,10 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - [English catalog]({public_url('/en/')})
 - [Russian guide: недвижимость в Дубае ниже рынка]({public_url('/ru/nedvizhimost-v-dubae-nizhe-rynka')})
 - [English guide: below-market property in Dubai]({public_url('/en/below-market-property-dubai')})
+- [Russian property blog]({public_url(RU_BLOG_PATH)})
+- [English property blog]({public_url(EN_BLOG_PATH)})
+- [RU: что делать при просрочке платежа за квартиру в Дубае]({public_url(RU_PAYMENT_ARTICLE_PATH)})
+- [EN: missed off-plan property payment in Dubai]({public_url(EN_PAYMENT_ARTICLE_PATH)})
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
@@ -4081,6 +4440,10 @@ def sitemap_xml():
         (public_url("/en/"), now_local().date().isoformat(), "daily", "1.0"),
         (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), now_local().date().isoformat(), "weekly", "0.9"),
         (public_url("/en/below-market-property-dubai"), now_local().date().isoformat(), "weekly", "0.9"),
+        (public_url(RU_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8"),
+        (public_url(EN_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8"),
+        (public_url(RU_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8"),
+        (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8"),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
@@ -4223,7 +4586,7 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
     return event_id
 
 
-def create_web_lead(project_id, name, contact, message, tg_user=None, session_id=None):
+def create_web_lead(project_id, name, contact, message, tg_user=None, session_id=None, source="Мини-приложение"):
     project = get_project(project_id) if project_id else None
     with db() as conn:
         cur = conn.execute(
@@ -4235,7 +4598,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
         )
         lead_id = cur.lastrowid
     record_catalog_event(
-        "catalog_lead",
+        "blog_lead" if source == "Блог" else "catalog_lead",
         project_id=project_id,
         tg_user=tg_user,
         payload={"lead_id": lead_id, "name": name, "contact": contact, "message": message, "session_id": session_id},
@@ -4243,7 +4606,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
     notify_admin(
         "\n".join(
             [
-                "Новая заявка из мини-приложения",
+                f"Новая заявка: {source.lower()}",
                 f"Лот: {project['title'] if project else 'не выбран'}",
                 f"Клиент: {name or 'не указано'}",
                 f"Контакт: {contact}",
@@ -4257,13 +4620,18 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
             chat_id = int(tg_user.get("id")) if tg_user.get("id") else None
         except (TypeError, ValueError):
             chat_id = None
+    crm_title = (
+        "Заявка из блога"
+        if source == "Блог"
+        else f"Заявка из каталога: {project['title'] if project else 'без лота'}"
+    )
     create_crm_card(
-        f"Заявка из каталога: {project['title'] if project else 'без лота'}",
+        crm_title,
         chat_id=chat_id,
         client_name=name or "",
         contact_value=contact,
         request=message or (project["district"] if project else ""),
-        source="Мини-апп каталог",
+        source=source,
     )
     return lead_id
 
@@ -4495,8 +4863,42 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .faq-list summary { cursor:pointer; font-weight:850; }
 .faq-list p { margin:8px 0 0; color:var(--muted); }
 .seo-cta { display:grid; gap:10px; background:#e7f2ec; border-color:#bcd8c9; }
+.blog-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.blog-card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:20px; display:grid; gap:12px; align-content:start; }
+.blog-card h2 { margin:0; font-size:25px; line-height:1.15; }
+.blog-card h2 a { text-decoration:none; }
+.blog-card p { margin:0; color:var(--muted); }
+.blog-card .app-button { justify-self:start; }
+.blog-card-meta { color:var(--gold); font-size:12px; font-weight:850; text-transform:uppercase; }
+.article-header { display:grid; gap:12px; max-width:940px; padding:30px 0 12px; }
+.article-header h1 { margin:0; font-size:clamp(34px,5vw,58px); line-height:1.03; }
+.article-byline { display:flex; flex-wrap:wrap; gap:8px 18px; color:var(--muted); font-size:13px; font-weight:700; }
+.article-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:18px; align-items:start; }
+.article-body { background:#fff; border:1px solid var(--line); border-radius:8px; padding:clamp(20px,4vw,42px); font-size:17px; line-height:1.72; }
+.article-body h2 { margin:34px 0 10px; font-size:28px; line-height:1.2; }
+.article-body p { margin:0 0 16px; }
+.article-body ul { margin:0 0 20px; padding-left:22px; display:grid; gap:7px; }
+.article-body a { color:var(--accent); }
+.article-lead-text { font-size:20px; color:var(--text); }
+.article-note { margin:24px 0; padding:18px; border:1px solid #e6bd80; border-left:4px solid var(--gold); border-radius:8px; background:#fff8eb; }
+.article-note strong { display:block; margin-bottom:7px; font-size:18px; }
+.article-note p { margin:0; }
+.article-source { padding-top:14px; border-top:1px solid var(--line); }
+.article-disclaimer { color:var(--muted); font-size:13px; }
+.article-author { position:sticky; top:14px; background:#f8faf8; border:1px solid var(--line); border-radius:8px; padding:18px; display:grid; gap:10px; }
+.article-author h2, .article-author p, .article-author dl { margin:0; }
+.article-author p { color:var(--muted); }
+.article-author dl { display:grid; gap:8px; }
+.article-author dl div { padding-top:8px; border-top:1px solid var(--line); }
+.article-author dt { color:var(--muted); font-size:11px; font-weight:850; text-transform:uppercase; }
+.article-author dd { margin:2px 0 0; font-weight:800; }
+.article-lead { display:grid; grid-template-columns:minmax(0,.8fr) minmax(340px,1.2fr); gap:24px; align-items:start; padding:24px; background:#e7f2ec; border:1px solid #bcd8c9; border-radius:8px; }
+.article-lead h2 { margin:4px 0 8px; font-size:30px; }
+.article-lead p { margin:0; color:var(--muted); }
+.article-lead-form { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
+.article-lead-form small { color:var(--muted); }
 @media (max-width:900px) { .app-shell { padding:14px 12px 36px; } .app-filters { position:static; grid-template-columns:1fr 1fr; } .app-filters input:first-child { grid-column:1 / -1; } .lot-grid { grid-template-columns:1fr; } .lot-detail { grid-template-columns:1fr; } .detail-panel { position:static; } }
-@media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } }
+@media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl, .blog-grid, .article-layout, .article-lead { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } .article-author { position:static; } }
 @media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
 """
 
@@ -6618,6 +7020,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(app_projects_page(query, base_path="/ru", lang="ru"))
         elif path == "/en/":
             self.send_html(app_projects_page(query, base_path="/en", lang="en"))
+        elif path == "/blog":
+            target = RU_BLOG_PATH if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else EN_BLOG_PATH
+            self.redirect(target)
+        elif path in ("/ru/blog", "/en/blog"):
+            self.redirect(path + "/")
+        elif path == RU_BLOG_PATH:
+            self.send_html(blog_index_page("ru"))
+        elif path == EN_BLOG_PATH:
+            self.send_html(blog_index_page("en"))
+        elif path == "/blog/missed-off-plan-property-payment-dubai":
+            target = RU_PAYMENT_ARTICLE_PATH if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else EN_PAYMENT_ARTICLE_PATH
+            self.redirect(target)
+        elif path == RU_PAYMENT_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Спасибо. Александр свяжется с вами лично." if status == "success" else ("Укажите телефон, WhatsApp или Telegram." if status == "missing" else "")
+            self.send_html(payment_article_page("ru", message=message))
+        elif path == EN_PAYMENT_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
+            self.send_html(payment_article_page("en", message=message))
         elif path == "/lot":
             target_lang = "ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "en"
             try:
@@ -6806,6 +7228,22 @@ class Handler(BaseHTTPRequestHandler):
                 else "Спасибо, заявка отправлена. @roi_counter свяжется с вами."
             )
             self.send_html(app_project_page(project_id, success_message, base_path=base_path, lang=lang))
+            return
+
+        if path in ("/ru/blog/lead", "/en/blog/lead"):
+            form = parse_form(self)
+            lang = "en" if path.startswith("/en/") else "ru"
+            article_path = EN_PAYMENT_ARTICLE_PATH if lang == "en" else RU_PAYMENT_ARTICLE_PATH
+            name = form_value(form, "name").strip()
+            contact = form_value(form, "contact").strip()
+            message = form_value(form, "message").strip()
+            if not contact:
+                self.redirect(f"{article_path}?lead=missing#consultation")
+                return
+            article_label = "Missed off-plan property payment in Dubai" if lang == "en" else "Просрочка платежа за квартиру в Дубае"
+            full_message = f"Статья: {article_label}\n{message}".strip()
+            create_web_lead(None, name, contact, full_message, source="Блог")
+            self.redirect(f"{article_path}?lead=success#consultation")
             return
 
         if path == "/app/event":
