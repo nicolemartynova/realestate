@@ -3185,18 +3185,23 @@ def project_cover(project_id):
 
 def app_filter_options():
     with db() as conn:
-        cities = conn.execute(
-            "select distinct city from projects where status='active' and city != '' order by city"
-        ).fetchall()
-        districts = conn.execute(
-            "select distinct district from projects where status='active' and district != '' order by district"
+        locations = conn.execute(
+            """
+            select distinct city, district
+            from projects
+            where status='active' and city != '' and district != ''
+            order by city, district
+            """
         ).fetchall()
         rooms = conn.execute(
             "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
         ).fetchall()
+    districts_by_city = {}
+    for row in locations:
+        districts_by_city.setdefault(row["city"], []).append(row["district"])
     return (
-        [row["city"] for row in cities],
-        [row["district"] for row in districts],
+        list(districts_by_city),
+        districts_by_city,
         [row["rooms"] for row in rooms],
     )
 
@@ -3243,6 +3248,13 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     district = (query.get("district", [""])[0] or "").strip()
     rooms = (query.get("rooms", [""])[0] or "").strip()
     max_price = (query.get("max_price", [""])[0] or "").strip()
+    cities, districts_by_city, rooms_options = app_filter_options()
+    if city and city not in districts_by_city:
+        city = ""
+    all_districts = sorted({item for values in districts_by_city.values() for item in values})
+    available_districts = districts_by_city.get(city, []) if city else all_districts
+    if district and district not in available_districts:
+        district = ""
     where = ["status = 'active'"]
     params = []
     if search:
@@ -3274,14 +3286,13 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
             """,
             params,
         ).fetchall()
-    cities, districts, rooms_options = app_filter_options()
     city_options = f'<option value="">{"All cities" if lang == "en" else "Все города"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == city else ""}>{escape(item)}</option>'
         for item in cities
     )
     district_options = f'<option value="">{"All areas" if lang == "en" else "Все районы"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == district else ""}>{escape(item)}</option>'
-        for item in districts
+        for item in available_districts
     )
     rooms_select = f'<option value="">{"Any bedrooms" if lang == "en" else "Любые комнаты"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == rooms else ""}>{escape(item)}</option>'
@@ -3307,7 +3318,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         guide_text = "How to find below-market property in Dubai: a guide by Below Market UAE"
         blog_path = EN_BLOG_PATH
         blog_text = "Dubai property insights"
-        search_placeholder = "Area, building, or title"
+        search_placeholder = "🔎 Search"
         max_price_placeholder = "Price up to, AED"
         find_label = "Search"
         reset_label = "Reset"
@@ -3320,12 +3331,15 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         guide_text = "Как находить недвижимость в Дубае ниже рынка: guide от Below Market UAE"
         blog_path = RU_BLOG_PATH
         blog_text = "Блог о недвижимости Дубая"
-        search_placeholder = "Район, здание или название"
+        search_placeholder = "🔎 Поиск"
         max_price_placeholder = "Цена до, AED"
         find_label = "Найти"
         reset_label = "Сбросить"
         empty_text = "По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор."
         description = "Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты."
+    district_map_json = json.dumps(districts_by_city, ensure_ascii=False).replace("</", "<\\/")
+    all_districts_json = json.dumps(all_districts, ensure_ascii=False).replace("</", "<\\/")
+    all_areas_label = "All areas" if lang == "en" else "Все районы"
     content = f"""
     {f'<div class="seo-topbar"><nav class="breadcrumbs"><span>Below Market UAE</span></nav>{language_switch}</div>' if language_switch else ''}
     <section class="app-hero">
@@ -3334,7 +3348,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <p>{escape(intro)}</p>
       <p><a href="{escape(guide_path)}">{escape(guide_text)}</a> · <a href="{escape(blog_path)}">{escape(blog_text)}</a></p>
     </section>
-    <form class="app-filters" method="get" action="{escape(root_path)}">
+    <form class="app-filters" id="catalog-filters" method="get" action="{escape(root_path)}">
       <input name="q" value="{escape(search)}" placeholder="{escape(search_placeholder)}">
       <select name="city">{city_options}</select>
       <select name="district">{district_options}</select>
@@ -3344,6 +3358,23 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <a class="app-button secondary" href="{escape(root_path)}">{escape(reset_label)}</a>
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else f'<div class="empty-state">{escape(empty_text)}</div>'}
+    <script>
+    (function() {{
+      var form = document.getElementById('catalog-filters');
+      if (!form) return;
+      var citySelect = form.elements.city;
+      var districtSelect = form.elements.district;
+      var districtsByCity = {district_map_json};
+      var allDistricts = {all_districts_json};
+      citySelect.addEventListener('change', function() {{
+        var districts = citySelect.value ? (districtsByCity[citySelect.value] || []) : allDistricts;
+        districtSelect.replaceChildren(new Option({json.dumps(all_areas_label, ensure_ascii=False)}, ''));
+        districts.forEach(function(district) {{
+          districtSelect.add(new Option(district, district));
+        }});
+      }});
+    }})();
+    </script>
     """
     return app_layout(
         title,
