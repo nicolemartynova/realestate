@@ -172,6 +172,7 @@ def init_db():
               id integer primary key autoincrement,
               title text not null,
               category text not null,
+              city text not null default 'Dubai',
               district text not null,
               building text not null,
               rooms text not null,
@@ -419,6 +420,8 @@ def init_db():
         ensure_column(conn, "projects", "tg_media_signature", "text")
         ensure_column(conn, "projects", "source_from", "text")
         ensure_column(conn, "projects", "cover_media_id", "integer")
+        ensure_column(conn, "projects", "city", "text not null default 'Dubai'")
+        conn.execute("update projects set city = 'Dubai' where city is null or trim(city) = ''")
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
@@ -548,6 +551,7 @@ def pct_below(price, reference):
 def project_caption(project):
     rows = [
         ("🏷", "Категория", project["category"]),
+        ("🌆", "Город", project["city"]),
         ("📍", "Район", project["district"]),
         ("🏢", "Здание", project["building"]),
         ("🛏", "Комнаты", project["rooms"]),
@@ -1330,22 +1334,11 @@ def project_share_url(project_id):
 
 
 def project_actions_keyboard(project_id, filters_active=False):
-    filter_button = (
-        {"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}
-        if filters_active
-        else {"text": "🔎 Искать по фильтрам", "callback_data": "filter_start"}
-    )
     rows = [
         [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
         [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
-        [{"text": "↗️ Поделиться лотом", "url": project_share_url(project_id)}],
-        [filter_button],
     ]
-    if PUBLIC_BASE_URL:
-        rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app"}}])
-    return inline_keyboard(
-        rows
-    )
+    return inline_keyboard(rows)
 
 
 def welcome_keyboard():
@@ -2774,6 +2767,7 @@ def build_active_projects_xlsx():
         ("id", "ID"),
         ("title", "Лот"),
         ("category", "Категория"),
+        ("city", "Город"),
         ("district", "Район"),
         ("building", "Название здания"),
         ("rooms", "Комнаты"),
@@ -3191,13 +3185,20 @@ def project_cover(project_id):
 
 def app_filter_options():
     with db() as conn:
+        cities = conn.execute(
+            "select distinct city from projects where status='active' and city != '' order by city"
+        ).fetchall()
         districts = conn.execute(
             "select distinct district from projects where status='active' and district != '' order by district"
         ).fetchall()
         rooms = conn.execute(
             "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
         ).fetchall()
-    return [row["district"] for row in districts], [row["rooms"] for row in rooms]
+    return (
+        [row["city"] for row in cities],
+        [row["district"] for row in districts],
+        [row["rooms"] for row in rooms],
+    )
 
 
 def slugify(value):
@@ -3238,15 +3239,19 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     query = query or {}
     lang = "en" if lang == "en" else "ru"
     search = (query.get("q", [""])[0] or "").strip()
+    city = (query.get("city", [""])[0] or "").strip()
     district = (query.get("district", [""])[0] or "").strip()
     rooms = (query.get("rooms", [""])[0] or "").strip()
     max_price = (query.get("max_price", [""])[0] or "").strip()
     where = ["status = 'active'"]
     params = []
     if search:
-        where.append("(title like ? or building like ? or district like ? or category like ?)")
+        where.append("(title like ? or building like ? or city like ? or district like ? or category like ?)")
         like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.extend([like, like, like, like, like])
+    if city:
+        where.append("city = ?")
+        params.append(city)
     if district:
         where.append("district = ?")
         params.append(district)
@@ -3269,7 +3274,11 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
             """,
             params,
         ).fetchall()
-    districts, rooms_options = app_filter_options()
+    cities, districts, rooms_options = app_filter_options()
+    city_options = f'<option value="">{"All cities" if lang == "en" else "Все города"}</option>' + "".join(
+        f'<option value="{escape(item)}"{" selected" if item == city else ""}>{escape(item)}</option>'
+        for item in cities
+    )
     district_options = f'<option value="">{"All areas" if lang == "en" else "Все районы"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == district else ""}>{escape(item)}</option>'
         for item in districts
@@ -3327,6 +3336,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     </section>
     <form class="app-filters" method="get" action="{escape(root_path)}">
       <input name="q" value="{escape(search)}" placeholder="{escape(search_placeholder)}">
+      <select name="city">{city_options}</select>
       <select name="district">{district_options}</select>
       <select name="rooms">{rooms_select}</select>
       <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="{escape(max_price_placeholder)}">
@@ -3360,7 +3370,7 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
       <div class="lot-cover">{f'<img src="{escape(cover)}" alt="{escape(display_name)}" loading="lazy">' if cover else escape(photo_placeholder)}</div>
       <div class="lot-body">
         <div class="lot-title"><span>{escape(display_name)}</span><span class="lot-price">{money(project['price'])} AED</span></div>
-        <div>{escape(project['building'])}<br><span class="muted">{escape(project['district'])}</span></div>
+        <div>{escape(project['building'])}<br><span class="muted">{escape(project['city'])}, {escape(project['district'])}</span></div>
         <div class="lot-meta">
           <span>{escape(localized_project_value(project['category'], lang))}</span>
           <span>{escape(localized_project_value(project['rooms'], lang))}</span>
@@ -3421,6 +3431,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
             gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt="{escape(display_name)} - {index + 1}" loading="{loading}"{priority}></div>')
     labels = {
         "category": "Category" if lang == "en" else "Категория",
+        "city": "City" if lang == "en" else "Город",
         "district": "Area" if lang == "en" else "Район",
         "building": "Building" if lang == "en" else "Здание",
         "rooms": "Bedrooms" if lang == "en" else "Комнаты",
@@ -3439,6 +3450,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
     }
     facts = [
         (labels["category"], localized_project_value(project["category"], lang)),
+        (labels["city"], project["city"]),
         (labels["district"], project["district"]),
         (labels["building"], project["building"]),
         (labels["rooms"], localized_project_value(project["rooms"], lang)),
@@ -3594,8 +3606,8 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         "address": {
             "@type": "PostalAddress",
             "streetAddress": project["building"] or "",
-            "addressLocality": project["district"] or "Dubai",
-            "addressRegion": "Dubai",
+            "addressLocality": project["city"] or "Dubai",
+            "addressRegion": project["district"] or "",
             "addressCountry": "AE",
         },
         "offers": {
@@ -5176,7 +5188,7 @@ a { color:inherit; }
 .app-brand { font-size:13px; color:var(--gold); font-weight:800; text-transform:uppercase; letter-spacing:.8px; }
 .app-hero h1 { margin:0; font-size:clamp(28px,5vw,44px); line-height:1.06; letter-spacing:0; max-width:780px; }
 .app-hero p { margin:0; max-width:680px; color:var(--muted); font-size:16px; }
-.app-filters { position:sticky; top:0; z-index:2; display:grid; grid-template-columns:1.2fr 1fr 1fr auto auto; gap:10px; padding:12px; margin:10px 0 18px; background:rgba(244,245,242,.92); backdrop-filter:blur(10px); border:1px solid var(--line); border-radius:8px; }
+.app-filters { position:sticky; top:0; z-index:2; display:grid; grid-template-columns:1.2fr repeat(4,1fr) auto auto; gap:10px; padding:12px; margin:10px 0 18px; background:rgba(244,245,242,.92); backdrop-filter:blur(10px); border:1px solid var(--line); border-radius:8px; }
 input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:11px 12px; background:#fff; color:var(--text); font:inherit; }
 button, .app-button { border:0; border-radius:7px; padding:11px 14px; background:var(--accent); color:#fff; font-weight:800; text-decoration:none; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
 .app-button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
@@ -5311,7 +5323,7 @@ def dashboard(message=""):
     rows = "".join(
         f"""
         <tr>
-          <td><strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['district'])}, {escape(p['building'])}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
+          <td><strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['city'])}, {escape(p['district'])}, {escape(p['building'])}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
           <td>{escape(p['rooms'])}</td>
           <td>{money(p['price'])} AED</td>
           <td><span class="status {escape(p['status'])}">{escape(p['status'])}</span></td>
@@ -6233,6 +6245,7 @@ def project_form(project=None, message=""):
       <div class="form-grid">
         <label>Лот<input name="title" required value="{escape(p.get('title'))}"></label>
         <label>Категория<input name="category" required value="{escape(p.get('category'))}" placeholder="Apartment / Villa"></label>
+        <label>Город<input name="city" required value="{escape(p.get('city') or 'Dubai')}" placeholder="Dubai"></label>
         <label>Район<input name="district" required value="{escape(p.get('district'))}"></label>
         <label>Название здания<input name="building" required value="{escape(p.get('building'))}"></label>
         <label>Комнаты<input name="rooms" required value="{escape(p.get('rooms'))}" placeholder="1BR / Studio"></label>
@@ -7213,6 +7226,7 @@ def save_project(form, project_id=None):
     values = {
         "title": form_value(form, "title"),
         "category": form_value(form, "category"),
+        "city": form_value(form, "city").strip() or "Dubai",
         "district": form_value(form, "district"),
         "building": form_value(form, "building"),
         "rooms": form_value(form, "rooms"),
@@ -7236,7 +7250,7 @@ def save_project(form, project_id=None):
             values["id"] = project_id
             conn.execute(
                 """
-                update projects set title=:title, category=:category, district=:district, building=:building,
+                update projects set title=:title, category=:category, city=:city, district=:district, building=:building,
                   rooms=:rooms, bathrooms=:bathrooms, floor_level=:floor_level, parking=:parking,
                   availability=:availability, furnishing=:furnishing, balcony=:balcony, area=:area,
                   price=:price, market_price=:market_price, distress=:distress, original_price=:original_price,
@@ -7250,10 +7264,10 @@ def save_project(form, project_id=None):
             values["created_at"] = iso_now()
             cur = conn.execute(
                 """
-                insert into projects(title, category, district, building, rooms, bathrooms, floor_level,
+                insert into projects(title, category, city, district, building, rooms, bathrooms, floor_level,
                   parking, availability, furnishing, balcony, area, price, market_price, distress,
                   original_price, source_from, description, created_at, updated_at)
-                values(:title, :category, :district, :building, :rooms, :bathrooms, :floor_level,
+                values(:title, :category, :city, :district, :building, :rooms, :bathrooms, :floor_level,
                   :parking, :availability, :furnishing, :balcony, :area, :price, :market_price,
                   :distress, :original_price, :source_from, :description, :created_at, :updated_at)
                 """,
