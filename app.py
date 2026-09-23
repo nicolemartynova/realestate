@@ -4211,7 +4211,10 @@ RU_PAYMENT_ARTICLE_PATH = "/ru/blog/prosrochka-platezha-za-kvartiru-v-dubae"
 EN_PAYMENT_ARTICLE_PATH = "/en/blog/missed-off-plan-property-payment-dubai"
 RU_NEGOTIATION_ARTICLE_PATH = "/ru/blog/kak-dogovoritsya-po-cene-s-sobstvennikom-kvartiry-v-dubae"
 EN_NEGOTIATION_ARTICLE_PATH = "/en/blog/how-to-negotiate-apartment-price-with-owner-dubai"
+RU_DEVELOPER_DISCOUNT_ARTICLE_PATH = "/ru/blog/kak-poluchit-skidku-ot-zastroyshchika-v-dubae"
+EN_DEVELOPER_DISCOUNT_ARTICLE_PATH = "/en/blog/how-to-get-discount-from-developer-dubai"
 BLOG_PUBLISHED_DATE = "2026-09-21"
+DEVELOPER_DISCOUNT_ARTICLE_DATE = "2026-09-23"
 
 
 def blog_alternates():
@@ -4238,6 +4241,14 @@ def negotiation_article_alternates():
     }
 
 
+def developer_discount_article_alternates():
+    return {
+        "ru": public_url(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH),
+        "en": public_url(EN_DEVELOPER_DISCOUNT_ARTICLE_PATH),
+        "x-default": public_url("/blog/how-to-get-discount-from-developer-dubai"),
+    }
+
+
 def blog_index_page(lang="ru"):
     lang = "en" if lang == "en" else "ru"
     is_en = lang == "en"
@@ -4256,16 +4267,25 @@ def blog_index_page(lang="ru"):
     )
     articles = [
         {
+            "path": EN_DEVELOPER_DISCOUNT_ARTICLE_PATH if is_en else RU_DEVELOPER_DISCOUNT_ARTICLE_PATH,
+            "title": "How and under what conditions can you get a discount from a developer in Dubai?" if is_en else "Как и при каких условиях можно получить скидку от застройщика в Дубае?",
+            "summary": "Developer discounts in Dubai: direct requests, holiday offers, higher down payments, cash purchases, and multi-unit deals." if is_en else "Скидки от застройщиков в Дубае: прямой запрос, праздничные предложения, повышенный первый взнос, оплата наличными и покупка нескольких квартир.",
+            "category": "Developer property" if is_en else "Недвижимость от застройщика",
+            "date": DEVELOPER_DISCOUNT_ARTICLE_DATE,
+        },
+        {
             "path": EN_PAYMENT_ARTICLE_PATH if is_en else RU_PAYMENT_ARTICLE_PATH,
             "title": "What to do if you cannot make an off-plan property payment in Dubai" if is_en else "Что делать, если вы не можете внести платеж за квартиру в Дубае",
             "summary": "How to contact the developer, assess a resale, understand the DLD notice procedure, and reduce the risk of contract termination." if is_en else "Как договориться с застройщиком, оценить перепродажу, разобраться в процедуре DLD и снизить риск расторжения договора.",
             "category": "Off-plan property" if is_en else "Off-plan недвижимость",
+            "date": BLOG_PUBLISHED_DATE,
         },
         {
             "path": EN_NEGOTIATION_ARTICLE_PATH if is_en else RU_NEGOTIATION_ARTICLE_PATH,
             "title": "How to negotiate the price with a Dubai apartment owner when buying?" if is_en else "Как договориться по цене с собственником квартиры Дубае при покупке?",
             "summary": "Three practical arguments for negotiating the price of a ready apartment with its owner in Dubai." if is_en else "Три аргумента для переговоров о цене готовой квартиры с собственником в Дубае.",
             "category": "Ready property" if is_en else "Готовая недвижимость",
+            "date": BLOG_PUBLISHED_DATE,
         },
     ]
     read_label = "Read article" if is_en else "Читать статью"
@@ -4297,7 +4317,7 @@ def blog_index_page(lang="ru"):
     article_cards = "".join(
         f"""
         <article class="blog-card">
-          <div class="blog-card-meta">{BLOG_PUBLISHED_DATE} · {escape(article['category'])}</div>
+          <div class="blog-card-meta">{article['date']} · {escape(article['category'])}</div>
           <h2><a href="{escape(article['path'])}">{escape(article['title'])}</a></h2>
           <p>{escape(article['summary'])}</p>
           <a class="app-button" href="{escape(article['path'])}">{escape(read_label)}</a>
@@ -4703,6 +4723,130 @@ def negotiation_article_page(lang="ru", message=""):
     )
 
 
+def developer_discount_article_page(lang="ru", message=""):
+    lang = "en" if lang == "en" else "ru"
+    is_en = lang == "en"
+    path = EN_DEVELOPER_DISCOUNT_ARTICLE_PATH if is_en else RU_DEVELOPER_DISCOUNT_ARTICLE_PATH
+    blog_path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
+    alternates = developer_discount_article_alternates()
+    h1 = (
+        "How and under what conditions can you get a discount from a developer in Dubai?"
+        if is_en
+        else "Как и при каких условиях можно получить скидку от застройщика в Дубае?"
+    )
+    title = (
+        "How to get a developer discount in Dubai | Below Market UAE"
+        if is_en
+        else "Скидка от застройщика в Дубае: как получить | Below Market UAE"
+    )
+    description = (
+        "How to get a discount from a developer in Dubai through a direct request, holiday offers, a higher first instalment, a cash purchase, or a multi-unit deal."
+        if is_en
+        else "Как получить скидку от застройщика в Дубае: прямой запрос, праздничные предложения, повышенный первый взнос, покупка за наличные и нескольких квартир."
+    )
+    keywords = (
+        "developer discount Dubai, how to get discount on Dubai apartment, DLD waiver Dubai, Dubai property cash buyer discount"
+        if is_en
+        else "скидка от застройщика в Дубае, как получить скидку на квартиру в Дубае, DLD waiver Dubai, скидка при покупке недвижимости в Дубае"
+    )
+    if is_en:
+        body = """
+        <p class="article-lead-text">Few people know this, but the vast majority of developers will give you a discount simply if you ask. However, it will be no more than 1-2%. This can be the starting point for a more substantive conversation about the price.</p>
+        <p>Check the calendar. If an Islamic holiday or a UAE public holiday falls today or in the coming days, you may receive another pleasant bonus. As a rule, this is a DLD waiver (a procedure in which the developer, rather than you, pays the registration fee of 4% of the apartment price).</p>
+        <p>Only then move to the next step: if you can pay a higher first instalment (for example, 30-50% instead of the 20% provided by the payment plan), or if you want to buy the apartment outright for cash, at this stage you can negotiate a further 7-30% off the price.</p>
+        <p>There is, however, one nuance: as a rule, large and reliable developers do not offer major discounts at this stage. And if you have the funds to pay for an apartment in cash, you can buy a ready property and rent it out immediately instead of freezing your capital in a construction project.</p>
+        <p>By the way, if you buy two or more apartments from a developer but use the standard payment plan, you can also discuss a discount depending on the purchase volume.</p>
+        <p>If you want to use the discount opportunity as a financial instrument, send me a private message on Telegram: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Aleksandr Vinogradov is a licensed Dubai real estate broker. He helps buyers assess developer offers, compare payment plans, and negotiate purchase terms."
+        breadcrumb = "Developer discount"
+    else:
+        body = """
+        <p class="article-lead-text">Мало кто знает, но подавляющее большинство застройщиков дадут вам скидку просто так, если попросить. Правда, это будет 1-2% максимум. С этого можно начинать уже более предметный разговор о цене.</p>
+        <p>Посмотрите в календарь. Если сегодня или на ближайшие даты намечается праздник по исламскому календарю или государственный праздник в ОАЭ, вы дополнительно сможете ещё один приятный бонус. Как правило, это DLD-waiver (процедура, когда регистрационный взнос в размере 4% от стоимости квартиры оплачивает застройщик, а не вы).</p>
+        <p>Только теперь переходите к следующему шагу: если у вас есть возможность оплатить повышенный первый взнос (например, 30-50% вместо 20%, предусмотренных планом рассрочки) или вообще вы хотите сразу взять квартиру за наличные, то дополнительно можно на этом этапе сторговать ещё 7-30% от цены.</p>
+        <p>Есть, правда и нюанс: как правило, крупные и надёжные застройщики на этом этапе больших скидок не дают, а если у вас есть средства оплатить квартиру наличными, то вы можете взять готовую и сразу сдать её в аренду, не замораживая ваш капитал в стройке.</p>
+        <p>Кстати, если берёте от застройщика 2 квартиры и более, но по стардартному плану платежей, то тут тоже можно обсуждать скидку в зависимости от объёма покупки.</p>
+        <p>Если вы хотите использовать возможность скидки как финансовый инструмент, напишите мне в личные сообщения в телеграм: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Александр Виноградов — лицензированный брокер по недвижимости в Дубае. Помогает покупателям оценивать предложения застройщиков, сравнивать планы платежей и обсуждать условия покупки."
+        breadcrumb = "Скидка от застройщика"
+    article_schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": h1,
+        "description": description,
+        "url": public_url(path),
+        "mainEntityOfPage": public_url(path),
+        "datePublished": DEVELOPER_DISCOUNT_ARTICLE_DATE,
+        "dateModified": DEVELOPER_DISCOUNT_ARTICLE_DATE,
+        "inLanguage": lang,
+        "author": {
+            "@type": "Person",
+            "name": "Aleksandr Vinogradov",
+            "alternateName": "Александр Виноградов",
+            "image": public_url("/assets/aleksandr-vinogradov.jpg"),
+            "jobTitle": "Licensed Real Estate Broker in Dubai",
+            "identifier": "Broker No. 88673",
+            "sameAs": ["https://t.me/roi_counter"],
+        },
+        "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
+        "about": ["Dubai developer property", "developer discount", "Dubai real estate"],
+        "keywords": keywords,
+    }
+    structured_data = [
+        article_schema,
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(f"/{lang}/")},
+                {"@type": "ListItem", "position": 2, "name": "Blog" if is_en else "Блог", "item": public_url(blog_path)},
+                {"@type": "ListItem", "position": 3, "name": h1, "item": public_url(path)},
+            ],
+        },
+    ]
+    content = f"""
+    <article class="seo-page article-page">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>/</span><a href="{escape(blog_path)}">{'Blog' if is_en else 'Блог'}</a><span>/</span><span>{escape(breadcrumb)}</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          {f'<a href="{escape(alternates["ru"])}">RU</a><span>EN</span>' if is_en else f'<span>RU</span><a href="{escape(alternates["en"])}">EN</a>'}
+        </div>
+      </div>
+      <header class="article-header">
+        <div class="app-brand">{'Developer property in Dubai' if is_en else 'Недвижимость от застройщика в Дубае'}</div>
+        <h1>{escape(h1)}</h1>
+        <div class="article-byline"><span>{'By: Aleksandr Vinogradov' if is_en else 'Автор: Александр Виноградов'}</span><span>{DEVELOPER_DISCOUNT_ARTICLE_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
+      </header>
+      <div class="article-layout">
+        <div class="article-body">{body}</div>
+        <aside class="article-author">
+          <img class="article-author-photo" src="/assets/aleksandr-vinogradov.jpg" alt="{'Aleksandr Vinogradov, licensed real estate broker in Dubai' if is_en else 'Александр Виноградов, лицензированный брокер по недвижимости в Дубае'}" width="112" height="112" loading="lazy">
+          <div class="app-brand">{'Author' if is_en else 'Автор статьи'}</div>
+          <h2>{'Aleksandr Vinogradov' if is_en else 'Александр Виноградов'}</h2>
+          <p>{escape(author_intro)}</p>
+          <dl><div><dt>{'Status' if is_en else 'Статус'}</dt><dd>{'Licensed Dubai real estate broker' if is_en else 'Лицензированный брокер в Дубае'}</dd></div><div><dt>{'Broker number' if is_en else 'Номер брокера'}</dt><dd>88673</dd></div><div><dt>{'Contact' if is_en else 'Контакт'}</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a></dd></div></dl>
+        </aside>
+      </div>
+      {article_lead_form(lang, "developer-discount")}
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        message=message,
+        description=description,
+        canonical_url=public_url(path),
+        structured_data=structured_data,
+        lang=lang,
+        alternate_urls=alternates,
+        keywords=keywords,
+        og_type="article",
+        og_image=public_url("/assets/aleksandr-vinogradov.jpg"),
+    )
+
+
 def robots_txt():
     sitemap_url = public_url("/sitemap.xml")
     llms_url = public_url("/llms.txt")
@@ -4816,6 +4960,8 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - [EN: missed off-plan property payment in Dubai]({public_url(EN_PAYMENT_ARTICLE_PATH)})
 - [RU: как договориться по цене с собственником квартиры в Дубае]({public_url(RU_NEGOTIATION_ARTICLE_PATH)})
 - [EN: how to negotiate an apartment price with an owner in Dubai]({public_url(EN_NEGOTIATION_ARTICLE_PATH)})
+- [RU: как получить скидку от застройщика в Дубае]({public_url(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH)})
+- [EN: how to get a discount from a developer in Dubai]({public_url(EN_DEVELOPER_DISCOUNT_ARTICLE_PATH)})
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
@@ -4860,6 +5006,8 @@ def sitemap_xml():
         (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
         (public_url(RU_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
         (public_url(EN_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
+        (public_url(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH), DEVELOPER_DISCOUNT_ARTICLE_DATE, "monthly", "0.8", language_links(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH, EN_DEVELOPER_DISCOUNT_ARTICLE_PATH, "/blog/how-to-get-discount-from-developer-dubai")),
+        (public_url(EN_DEVELOPER_DISCOUNT_ARTICLE_PATH), DEVELOPER_DISCOUNT_ARTICLE_DATE, "monthly", "0.8", language_links(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH, EN_DEVELOPER_DISCOUNT_ARTICLE_PATH, "/blog/how-to-get-discount-from-developer-dubai")),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
@@ -7487,6 +7635,17 @@ class Handler(BaseHTTPRequestHandler):
             status = query.get("lead", [""])[0]
             message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
             self.send_html(negotiation_article_page("en", message=message))
+        elif path == "/blog/how-to-get-discount-from-developer-dubai":
+            target = RU_DEVELOPER_DISCOUNT_ARTICLE_PATH if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else EN_DEVELOPER_DISCOUNT_ARTICLE_PATH
+            self.redirect(target)
+        elif path == RU_DEVELOPER_DISCOUNT_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Спасибо. Александр свяжется с вами лично." if status == "success" else ("Укажите телефон, WhatsApp или Telegram." if status == "missing" else "")
+            self.send_html(developer_discount_article_page("ru", message=message))
+        elif path == EN_DEVELOPER_DISCOUNT_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
+            self.send_html(developer_discount_article_page("en", message=message))
         elif path == "/lot":
             target_lang = "ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "en"
             try:
@@ -7709,6 +7868,10 @@ class Handler(BaseHTTPRequestHandler):
                 "price-negotiation": {
                     "path": EN_NEGOTIATION_ARTICLE_PATH if lang == "en" else RU_NEGOTIATION_ARTICLE_PATH,
                     "label": "How to negotiate an apartment price in Dubai" if lang == "en" else "Как договориться по цене с собственником квартиры в Дубае",
+                },
+                "developer-discount": {
+                    "path": EN_DEVELOPER_DISCOUNT_ARTICLE_PATH if lang == "en" else RU_DEVELOPER_DISCOUNT_ARTICLE_PATH,
+                    "label": "How to get a discount from a developer in Dubai" if lang == "en" else "Как получить скидку от застройщика в Дубае",
                 },
             }.get(article_key)
             if not article_config:
