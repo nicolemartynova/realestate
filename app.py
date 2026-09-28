@@ -3130,7 +3130,8 @@ def app_layout(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" href="/assets/watermark-logo.png" type="image/png">
+  <link rel="icon" href="/assets/favicon-120.png" sizes="120x120" type="image/png">
+  <link rel="apple-touch-icon" href="/assets/favicon-120.png">
   {('<meta name="robots" content="noindex, nofollow">' if noindex else '')}
   <title>{escape(title)}</title>
   <meta name="description" content="{escape(description)}">
@@ -3248,6 +3249,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     district = (query.get("district", [""])[0] or "").strip()
     rooms = (query.get("rooms", [""])[0] or "").strip()
     max_price = (query.get("max_price", [""])[0] or "").strip()
+    has_catalog_filters = any((search, city, district, rooms, max_price))
     cities, districts_by_city, rooms_options = app_filter_options()
     if city and city not in districts_by_city:
         city = ""
@@ -3383,7 +3385,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         catalog_event="catalog_open",
         description=description,
         canonical_url=public_url(root_path if is_public_catalog else "/app"),
-        noindex=not is_public_catalog,
+        noindex=not is_public_catalog or has_catalog_filters,
         lang=lang,
         alternate_urls=alternates,
     )
@@ -5028,7 +5030,13 @@ def robots_txt():
     lines = ["User-agent: *", *public_paths, *private_paths, ""]
     for crawler in ai_crawlers:
         lines.extend([f"User-agent: {crawler}", *public_paths, *private_paths, ""])
-    lines.extend([f"Sitemap: {sitemap_url}", f"LLMS: {llms_url}", ""])
+    lines.extend([
+        "Clean-param: q&city&district&rooms&max_price /ru/",
+        "Clean-param: q&city&district&rooms&max_price /en/",
+        f"Sitemap: {sitemap_url}",
+        f"LLMS: {llms_url}",
+        "",
+    ])
     return "\n".join(lines)
 
 
@@ -8394,10 +8402,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
-    configure_bot_menu_button()
     stop_event = threading.Event()
+    menu_thread = threading.Thread(target=configure_bot_menu_button, daemon=True)
     bot_thread = threading.Thread(target=bot_loop, args=(stop_event,), daemon=True)
     scheduler_thread = threading.Thread(target=scheduler_loop, args=(stop_event,), daemon=True)
+    menu_thread.start()
     bot_thread.start()
     scheduler_thread.start()
 
