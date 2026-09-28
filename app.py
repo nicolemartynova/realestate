@@ -4213,8 +4213,11 @@ RU_NEGOTIATION_ARTICLE_PATH = "/ru/blog/kak-dogovoritsya-po-cene-s-sobstvennikom
 EN_NEGOTIATION_ARTICLE_PATH = "/en/blog/how-to-negotiate-apartment-price-with-owner-dubai"
 RU_DEVELOPER_DISCOUNT_ARTICLE_PATH = "/ru/blog/kak-poluchit-skidku-ot-zastroyshchika-v-dubae"
 EN_DEVELOPER_DISCOUNT_ARTICLE_PATH = "/en/blog/how-to-get-discount-from-developer-dubai"
+RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH = "/ru/blog/kak-vyyavit-nedobrosovestnykh-zastroyshchikov-v-dubae"
+EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH = "/en/blog/how-to-identify-unreliable-developers-dubai"
 BLOG_PUBLISHED_DATE = "2026-09-21"
 DEVELOPER_DISCOUNT_ARTICLE_DATE = "2026-09-23"
+UNRELIABLE_DEVELOPERS_ARTICLE_DATE = "2026-09-28"
 
 
 def blog_alternates():
@@ -4249,6 +4252,14 @@ def developer_discount_article_alternates():
     }
 
 
+def unreliable_developers_article_alternates():
+    return {
+        "ru": public_url(RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH),
+        "en": public_url(EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH),
+        "x-default": public_url("/blog/how-to-identify-unreliable-developers-dubai"),
+    }
+
+
 def blog_index_page(lang="ru"):
     lang = "en" if lang == "en" else "ru"
     is_en = lang == "en"
@@ -4266,6 +4277,13 @@ def blog_index_page(lang="ru"):
         else "Практические материалы для покупателей и инвесторов: платежные планы, риски off-plan, distress deals, перепродажа и объекты ниже рынка."
     )
     articles = [
+        {
+            "path": EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH if is_en else RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH,
+            "title": "How to identify unscrupulous developers in the Dubai market?" if is_en else "Как выявить недобросовестных застройщиков на рынке Дубая?",
+            "summary": "Four warning signs to check before investing in a Dubai off-plan project, including escrow accounts, delays, payment requests, and completed projects." if is_en else "Четыре признака, которые стоит проверить перед инвестированием в проект в Дубае: эскроу-счёт, задержки, порядок оплаты и реализованные проекты.",
+            "category": "Developer due diligence" if is_en else "Проверка застройщика",
+            "date": UNRELIABLE_DEVELOPERS_ARTICLE_DATE,
+        },
         {
             "path": EN_DEVELOPER_DISCOUNT_ARTICLE_PATH if is_en else RU_DEVELOPER_DISCOUNT_ARTICLE_PATH,
             "title": "How and under what conditions can you get a discount from a developer in Dubai?" if is_en else "Как и при каких условиях можно получить скидку от застройщика в Дубае?",
@@ -4298,6 +4316,7 @@ def blog_index_page(lang="ru"):
             "description": description,
             "url": public_url(path),
             "inLanguage": "en" if is_en else "ru",
+            "dateModified": UNRELIABLE_DEVELOPERS_ARTICLE_DATE,
             "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
             "hasPart": [
                 {"@type": "Article", "headline": article["title"], "url": public_url(article["path"])}
@@ -4847,6 +4866,130 @@ def developer_discount_article_page(lang="ru", message=""):
     )
 
 
+def unreliable_developers_article_page(lang="ru", message=""):
+    lang = "en" if lang == "en" else "ru"
+    is_en = lang == "en"
+    path = EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH if is_en else RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH
+    blog_path = EN_BLOG_PATH if is_en else RU_BLOG_PATH
+    alternates = unreliable_developers_article_alternates()
+    h1 = (
+        "How to identify unscrupulous developers in the Dubai market?"
+        if is_en
+        else "Как выявить недобросовестных застройщиков на рынке Дубая?"
+    )
+    title = (
+        "How to identify unreliable Dubai developers | Below Market UAE"
+        if is_en
+        else "Как выявить недобросовестного застройщика в Дубае | Below Market UAE"
+    )
+    description = (
+        "Four warning signs of an unreliable Dubai property developer: missing escrow accounts, construction delays, unusual discounts, and a weak delivery history."
+        if is_en
+        else "Четыре признака недобросовестного застройщика в Дубае: отсутствие эскроу-счёта, задержки строительства, необычные скидки и история реализованных проектов."
+    )
+    keywords = (
+        "unreliable developers Dubai, how to check Dubai developer, Dubai property developer escrow account, Dubai developer due diligence"
+        if is_en
+        else "недобросовестные застройщики Дубая, как проверить застройщика в Дубае, эскроу-счёт застройщика Дубай, проверка застройщика ОАЭ"
+    )
+    if is_en:
+        body = """
+        <p class="article-lead-text">1) The developer requests a non-refundable deposit when the project does not have an escrow account — such a scheme appears to violate the law, and your funds settle in the developer's accounts.</p>
+        <p>2) The developer delivers projects late and freezes some of them (this information can be checked through the Dubai Land Department or Propsearch).</p>
+        <p>3) The developer offers a discount of up to 30-40% for full payment made outside the escrow account.</p>
+        <p>4) The developer changes the subject when completed projects are discussed, while trying to inspire confidence by emphasising how long it has been in the market.</p>
+        <p>Each of these points increases the risk of your capital being frozen in the project.</p>
+        <p>I provide independent analysis of developers and projects free of charge. To receive a detailed review of a project being offered to you, send me a private message on Telegram: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Aleksandr Vinogradov is a licensed Dubai real estate broker. He independently analyses developers and projects for property buyers and investors."
+        breadcrumb = "Checking a developer"
+    else:
+        body = """
+        <p class="article-lead-text">1) Застройщик просит невозвратный депозит при отсутствии эскроу-счёта у проекта – такая схема выглядит как нарушение законодательства, ваши средства оседают на счетах застройщика.</p>
+        <p>2) Застройщик сдаёт проекты с задержкой, а некоторые замораживает (информация проверяется через Земельный Департамент или Propsearch).</p>
+        <p>3) Застройщик предлагает скидку до 30-40% за полную оплату в обход эскроу-счёта.</p>
+        <p>4) Застройщик переводит тему, если речь идёт о реализованных проектах, при этом пытается внушить доверие тем, как давно он на рынке.</p>
+        <p>Каждый из указанных пунктов повышает риски заморозки вашего капитала в проекте.</p>
+        <p>Я провожу независимую аналитику застройщиков и проектов бесплатно, чтобы получить детальный разбор проекта, который предлагают вам, напишите мне в личные сообщения в телеграм: <a href="https://t.me/roi_counter">https://t.me/roi_counter</a></p>
+        """
+        author_intro = "Александр Виноградов — лицензированный брокер по недвижимости в Дубае. Независимо анализирует застройщиков и проекты для покупателей и инвесторов."
+        breadcrumb = "Проверка застройщика"
+    article_schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": h1,
+        "description": description,
+        "url": public_url(path),
+        "mainEntityOfPage": public_url(path),
+        "datePublished": UNRELIABLE_DEVELOPERS_ARTICLE_DATE,
+        "dateModified": UNRELIABLE_DEVELOPERS_ARTICLE_DATE,
+        "inLanguage": lang,
+        "author": {
+            "@type": "Person",
+            "name": "Aleksandr Vinogradov",
+            "alternateName": "Александр Виноградов",
+            "image": public_url("/assets/aleksandr-vinogradov.jpg"),
+            "jobTitle": "Licensed Real Estate Broker in Dubai",
+            "identifier": "Broker No. 88673",
+            "sameAs": ["https://t.me/roi_counter"],
+        },
+        "publisher": {"@type": "Organization", "name": "Below Market UAE", "url": public_url("/")},
+        "about": ["Dubai property developers", "developer due diligence", "Dubai real estate escrow account"],
+        "keywords": keywords,
+    }
+    structured_data = [
+        article_schema,
+        {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Below Market UAE", "item": public_url(f"/{lang}/")},
+                {"@type": "ListItem", "position": 2, "name": "Blog" if is_en else "Блог", "item": public_url(blog_path)},
+                {"@type": "ListItem", "position": 3, "name": h1, "item": public_url(path)},
+            ],
+        },
+    ]
+    content = f"""
+    <article class="seo-page article-page">
+      <div class="seo-topbar">
+        <nav class="breadcrumbs"><a href="/{lang}/">Below Market UAE</a><span>/</span><a href="{escape(blog_path)}">{'Blog' if is_en else 'Блог'}</a><span>/</span><span>{escape(breadcrumb)}</span></nav>
+        <div class="language-switch" aria-label="Language switch">
+          {f'<a href="{escape(alternates["ru"])}">RU</a><span>EN</span>' if is_en else f'<span>RU</span><a href="{escape(alternates["en"])}">EN</a>'}
+        </div>
+      </div>
+      <header class="article-header">
+        <div class="app-brand">{'Dubai developer due diligence' if is_en else 'Проверка застройщика в Дубае'}</div>
+        <h1>{escape(h1)}</h1>
+        <div class="article-byline"><span>{'By: Aleksandr Vinogradov' if is_en else 'Автор: Александр Виноградов'}</span><span>{UNRELIABLE_DEVELOPERS_ARTICLE_DATE}</span><span>{'Licensed Dubai real estate broker · No. 88673' if is_en else 'Лицензированный брокер в Дубае · № 88673'}</span></div>
+      </header>
+      <div class="article-layout">
+        <div class="article-body">{body}</div>
+        <aside class="article-author">
+          <img class="article-author-photo" src="/assets/aleksandr-vinogradov.jpg" alt="{'Aleksandr Vinogradov, licensed real estate broker in Dubai' if is_en else 'Александр Виноградов, лицензированный брокер по недвижимости в Дубае'}" width="112" height="112" loading="lazy">
+          <div class="app-brand">{'Author' if is_en else 'Автор статьи'}</div>
+          <h2>{'Aleksandr Vinogradov' if is_en else 'Александр Виноградов'}</h2>
+          <p>{escape(author_intro)}</p>
+          <dl><div><dt>{'Status' if is_en else 'Статус'}</dt><dd>{'Licensed Dubai real estate broker' if is_en else 'Лицензированный брокер в Дубае'}</dd></div><div><dt>{'Broker number' if is_en else 'Номер брокера'}</dt><dd>88673</dd></div><div><dt>{'Contact' if is_en else 'Контакт'}</dt><dd><a href="https://t.me/roi_counter">@roi_counter</a></dd></div></dl>
+        </aside>
+      </div>
+      {article_lead_form(lang, "unreliable-developers")}
+    </article>
+    """
+    return app_layout(
+        title,
+        content,
+        message=message,
+        description=description,
+        canonical_url=public_url(path),
+        structured_data=structured_data,
+        lang=lang,
+        alternate_urls=alternates,
+        keywords=keywords,
+        og_type="article",
+        og_image=public_url("/assets/aleksandr-vinogradov.jpg"),
+    )
+
+
 def robots_txt():
     sitemap_url = public_url("/sitemap.xml")
     llms_url = public_url("/llms.txt")
@@ -4962,6 +5105,8 @@ Below Market UAE is a Dubai real estate discovery service focused on properties 
 - [EN: how to negotiate an apartment price with an owner in Dubai]({public_url(EN_NEGOTIATION_ARTICLE_PATH)})
 - [RU: как получить скидку от застройщика в Дубае]({public_url(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH)})
 - [EN: how to get a discount from a developer in Dubai]({public_url(EN_DEVELOPER_DISCOUNT_ARTICLE_PATH)})
+- [RU: как выявить недобросовестных застройщиков в Дубае]({public_url(RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH)})
+- [EN: how to identify unreliable developers in Dubai]({public_url(EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH)})
 - [XML sitemap]({public_url('/sitemap.xml')})
 - [Robots.txt]({public_url('/robots.txt')})
 
@@ -5000,14 +5145,16 @@ def sitemap_xml():
         (public_url("/en/"), catalog_lastmod, "daily", "1.0", language_links("/ru/", "/en/", "/")),
         (public_url("/ru/nedvizhimost-v-dubae-nizhe-rynka"), BLOG_PUBLISHED_DATE, "weekly", "0.9", language_links("/ru/nedvizhimost-v-dubae-nizhe-rynka", "/en/below-market-property-dubai", "/below-market-property-dubai")),
         (public_url("/en/below-market-property-dubai"), BLOG_PUBLISHED_DATE, "weekly", "0.9", language_links("/ru/nedvizhimost-v-dubae-nizhe-rynka", "/en/below-market-property-dubai", "/below-market-property-dubai")),
-        (public_url(RU_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
-        (public_url(EN_BLOG_PATH), BLOG_PUBLISHED_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
+        (public_url(RU_BLOG_PATH), UNRELIABLE_DEVELOPERS_ARTICLE_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
+        (public_url(EN_BLOG_PATH), UNRELIABLE_DEVELOPERS_ARTICLE_DATE, "weekly", "0.8", language_links(RU_BLOG_PATH, EN_BLOG_PATH, "/blog")),
         (public_url(RU_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
         (public_url(EN_PAYMENT_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_PAYMENT_ARTICLE_PATH, EN_PAYMENT_ARTICLE_PATH, "/blog/missed-off-plan-property-payment-dubai")),
         (public_url(RU_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
         (public_url(EN_NEGOTIATION_ARTICLE_PATH), BLOG_PUBLISHED_DATE, "monthly", "0.8", language_links(RU_NEGOTIATION_ARTICLE_PATH, EN_NEGOTIATION_ARTICLE_PATH, "/blog/how-to-negotiate-apartment-price-with-owner-dubai")),
         (public_url(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH), DEVELOPER_DISCOUNT_ARTICLE_DATE, "monthly", "0.8", language_links(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH, EN_DEVELOPER_DISCOUNT_ARTICLE_PATH, "/blog/how-to-get-discount-from-developer-dubai")),
         (public_url(EN_DEVELOPER_DISCOUNT_ARTICLE_PATH), DEVELOPER_DISCOUNT_ARTICLE_DATE, "monthly", "0.8", language_links(RU_DEVELOPER_DISCOUNT_ARTICLE_PATH, EN_DEVELOPER_DISCOUNT_ARTICLE_PATH, "/blog/how-to-get-discount-from-developer-dubai")),
+        (public_url(RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH), UNRELIABLE_DEVELOPERS_ARTICLE_DATE, "monthly", "0.8", language_links(RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH, EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH, "/blog/how-to-identify-unreliable-developers-dubai")),
+        (public_url(EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH), UNRELIABLE_DEVELOPERS_ARTICLE_DATE, "monthly", "0.8", language_links(RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH, EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH, "/blog/how-to-identify-unreliable-developers-dubai")),
     ]
     for project in projects:
         lastmod = (project["updated_at"] or project["created_at"] or now_local().date().isoformat())[:10]
@@ -7646,6 +7793,17 @@ class Handler(BaseHTTPRequestHandler):
             status = query.get("lead", [""])[0]
             message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
             self.send_html(developer_discount_article_page("en", message=message))
+        elif path == "/blog/how-to-identify-unreliable-developers-dubai":
+            target = RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH
+            self.redirect(target)
+        elif path == RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Спасибо. Александр свяжется с вами лично." if status == "success" else ("Укажите телефон, WhatsApp или Telegram." if status == "missing" else "")
+            self.send_html(unreliable_developers_article_page("ru", message=message))
+        elif path == EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH:
+            status = query.get("lead", [""])[0]
+            message = "Thank you. Alexander will contact you personally." if status == "success" else ("Please enter your phone, WhatsApp, or Telegram." if status == "missing" else "")
+            self.send_html(unreliable_developers_article_page("en", message=message))
         elif path == "/lot":
             target_lang = "ru" if preferred_public_language(self.headers.get("Accept-Language")) == "ru" else "en"
             try:
@@ -7872,6 +8030,10 @@ class Handler(BaseHTTPRequestHandler):
                 "developer-discount": {
                     "path": EN_DEVELOPER_DISCOUNT_ARTICLE_PATH if lang == "en" else RU_DEVELOPER_DISCOUNT_ARTICLE_PATH,
                     "label": "How to get a discount from a developer in Dubai" if lang == "en" else "Как получить скидку от застройщика в Дубае",
+                },
+                "unreliable-developers": {
+                    "path": EN_UNRELIABLE_DEVELOPERS_ARTICLE_PATH if lang == "en" else RU_UNRELIABLE_DEVELOPERS_ARTICLE_PATH,
+                    "label": "How to identify unreliable developers in Dubai" if lang == "en" else "Как выявить недобросовестных застройщиков в Дубае",
                 },
             }.get(article_key)
             if not article_config:
