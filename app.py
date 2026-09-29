@@ -436,7 +436,17 @@ def init_db():
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
+        ensure_column(conn, "web_leads", "traffic_source", "text")
+        ensure_column(conn, "web_leads", "traffic_medium", "text")
+        ensure_column(conn, "web_leads", "traffic_campaign", "text")
+        ensure_column(conn, "web_leads", "landing_page", "text")
+        ensure_column(conn, "web_leads", "referrer", "text")
         ensure_column(conn, "catalog_sessions", "followup_variant", "text")
+        ensure_column(conn, "catalog_sessions", "traffic_source", "text")
+        ensure_column(conn, "catalog_sessions", "traffic_medium", "text")
+        ensure_column(conn, "catalog_sessions", "traffic_campaign", "text")
+        ensure_column(conn, "catalog_sessions", "landing_page", "text")
+        ensure_column(conn, "catalog_sessions", "referrer", "text")
         ensure_column(conn, "crm_notes", "chat_id", "integer")
         ensure_column(conn, "crm_notes", "card_id", "integer")
         ensure_column(conn, "crm_reminders", "chat_id", "integer")
@@ -2864,6 +2874,63 @@ def openai_ads_pixel_head():
   <!-- End OpenAI Ads Measurement Pixel -->"""
 
 
+def traffic_attribution_script():
+    return r"""
+  <script>
+  (function() {
+    var storageKey = 'traffic_attribution';
+    var params = new URLSearchParams(window.location.search);
+    var hasCampaignData = ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','oppref','gclid','yclid','fbclid','msclkid','ttclid']
+      .some(function(key) { return params.has(key); });
+    var stored = null;
+    try { stored = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (e) {}
+    var referrer = '';
+    var referrerHost = '';
+    if (document.referrer) {
+      try {
+        var referrerUrl = new URL(document.referrer);
+        if (referrerUrl.origin !== window.location.origin) {
+          referrer = (referrerUrl.origin + referrerUrl.pathname).slice(0, 500);
+          referrerHost = referrerUrl.hostname.replace(/^www\./, '').toLowerCase();
+        }
+      } catch (e) {}
+    }
+    function inferredSource() {
+      if (params.get('oppref')) return ['ChatGPT Ads', 'cpc'];
+      if (params.get('gclid')) return ['Google Ads', 'cpc'];
+      if (params.get('yclid')) return ['Yandex Direct', 'cpc'];
+      if (params.get('fbclid')) return ['Meta Ads', 'paid_social'];
+      if (params.get('msclkid')) return ['Microsoft Ads', 'cpc'];
+      if (params.get('ttclid')) return ['TikTok Ads', 'paid_social'];
+      if (/^(google\.|google$)/.test(referrerHost) || referrerHost.indexOf('google.') === 0) return ['Google Organic', 'organic'];
+      if (referrerHost === 'yandex.ru' || referrerHost.indexOf('yandex.') === 0) return ['Yandex Organic', 'organic'];
+      if (referrerHost === 'bing.com' || referrerHost.endsWith('.bing.com')) return ['Bing Organic', 'organic'];
+      if (referrerHost === 't.me' || referrerHost === 'telegram.me') return ['Telegram', 'referral'];
+      if (referrerHost === 'instagram.com' || referrerHost.endsWith('.instagram.com')) return ['Instagram', 'referral'];
+      if (referrerHost === 'facebook.com' || referrerHost.endsWith('.facebook.com')) return ['Facebook', 'referral'];
+      if (referrerHost) return [referrerHost, 'referral'];
+      return ['Direct', 'direct'];
+    }
+    var inferred = inferredSource();
+    var attribution = (!hasCampaignData && stored) ? stored : {
+      source: (params.get('utm_source') || inferred[0]).slice(0, 120),
+      medium: (params.get('utm_medium') || inferred[1]).slice(0, 120),
+      campaign: (params.get('utm_campaign') || '').slice(0, 200),
+      content: (params.get('utm_content') || '').slice(0, 200),
+      term: (params.get('utm_term') || '').slice(0, 200),
+      landing_page: (window.location.pathname + window.location.search).slice(0, 500),
+      referrer: referrer,
+      click_id_type: params.get('oppref') ? 'oppref' : params.get('gclid') ? 'gclid' : params.get('yclid') ? 'yclid' : params.get('fbclid') ? 'fbclid' : params.get('msclkid') ? 'msclkid' : params.get('ttclid') ? 'ttclid' : ''
+    };
+    try { sessionStorage.setItem(storageKey, JSON.stringify(attribution)); } catch (e) {}
+    window.__trafficAttribution = attribution;
+    document.querySelectorAll('input[name="traffic_attribution"]').forEach(function(input) {
+      input.value = JSON.stringify(attribution);
+    });
+  })();
+  </script>"""
+
+
 def public_url(path="/"):
     if not PUBLIC_BASE_URL:
         return path
@@ -3006,6 +3073,11 @@ def app_layout(
     var user = tg && tg.initDataUnsafe ? tg.initDataUnsafe.user : null;
     var metrikaCounterId = {json.dumps(YANDEX_METRIKA_ID)};
     var metrikaProject = {json.dumps(metrika_project, ensure_ascii=False)};
+    var traffic = Object.assign({{}}, window.__trafficAttribution || {{}});
+    if (user && (!traffic.source || traffic.source === 'Direct')) {{
+      traffic.source = 'Telegram Mini App';
+      traffic.medium = 'telegram';
+    }}
     var sessionId = sessionStorage.getItem('catalog_session_id');
     if (!sessionId) {{
       sessionId = String(Date.now()) + '-' + Math.random().toString(16).slice(2);
@@ -3019,6 +3091,9 @@ def app_layout(
     document.querySelectorAll('input[name="catalog_session_id"]').forEach(function(input) {{
       input.value = sessionId;
     }});
+    document.querySelectorAll('input[name="traffic_attribution"]').forEach(function(input) {{
+      input.value = JSON.stringify(traffic);
+    }});
     function payload(eventType) {{
       return {{
         event_type: eventType,
@@ -3026,6 +3101,7 @@ def app_layout(
         tg_user: user || null,
         path: window.location.pathname + window.location.search,
         session_id: sessionId,
+        traffic: traffic,
         visible: document.visibilityState || ''
       }};
     }}
@@ -3194,6 +3270,7 @@ def app_layout(
     {content}
   </main>
   {footer_html}
+  {traffic_attribution_script()}
   {event_script}
 </body>
 </html>"""
@@ -3639,6 +3716,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
           <input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
           <input type="hidden" name="catalog_session_id" value="">
+          <input type="hidden" name="traffic_attribution" value="">
           <input name="name" placeholder="{escape(name_placeholder)}">
           <input name="contact" required placeholder="{escape(contact_placeholder)}">
           <textarea name="message" placeholder="{escape(comment_placeholder)}"></textarea>
@@ -4435,6 +4513,7 @@ def article_lead_form(lang="ru", article_slug="payment-default"):
       </div>
       <form class="lead-form article-lead-form" method="post" action="/{lang}/blog/lead">
         <input type="hidden" name="article" value="{escape(article_slug)}">
+        <input type="hidden" name="traffic_attribution" value="">
         <input name="name" required autocomplete="name" placeholder="{'Your name' if is_en else 'Ваше имя'}">
         <input name="contact" required autocomplete="tel" placeholder="{'Phone, WhatsApp, or Telegram' if is_en else 'Телефон, WhatsApp или Telegram'}">
         <textarea name="message" placeholder="{'Briefly describe your situation' if is_en else 'Кратко опишите вашу ситуацию'}"></textarea>
@@ -4456,6 +4535,9 @@ def article_lead_form(lang="ru", article_slug="payment-default"):
         window.dataLayer.push(Object.assign({{event:'lead_submit', lead_source:'blog'}}, details));
         if (typeof window.ym === 'function' && {json.dumps(bool(YANDEX_METRIKA_ID))}) {{
           try {{ window.ym(Number({json.dumps(YANDEX_METRIKA_ID or '0')}), 'reachGoal', 'lead_submit', details); }} catch (e) {{}}
+        }}
+        if (typeof window.oaiq === 'function') {{
+          try {{ window.oaiq('measure', 'lead_created', {{type: 'customer_action'}}); }} catch (e) {{}}
         }}
       }});
     }})();
@@ -5253,19 +5335,68 @@ def catalog_session_id(payload):
     return value[:80] or None
 
 
-def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, name="", had_lead=False):
+def normalize_traffic_attribution(value):
+    if not isinstance(value, dict):
+        return {}
+    limits = {
+        "source": 120,
+        "medium": 120,
+        "campaign": 200,
+        "content": 200,
+        "term": 200,
+        "landing_page": 500,
+        "referrer": 500,
+        "click_id_type": 30,
+    }
+    return {
+        key: str(value.get(key) or "").strip()[:limit]
+        for key, limit in limits.items()
+        if str(value.get(key) or "").strip()
+    }
+
+
+def parse_traffic_attribution(raw_value):
+    if not raw_value:
+        return {}
+    try:
+        return normalize_traffic_attribution(json.loads(raw_value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def traffic_source_label(traffic):
+    traffic = normalize_traffic_attribution(traffic)
+    source = traffic.get("source") or "Источник ранее не сохранялся"
+    medium = traffic.get("medium") or ""
+    campaign = traffic.get("campaign") or ""
+    label = source
+    if medium and medium not in {"direct", "referral"}:
+        label += f" / {medium}"
+    if campaign:
+        label += f" · {campaign}"
+    return label
+
+
+def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, name="", had_lead=False, traffic=None):
     if not session_id:
         return
     now = iso_now()
+    traffic = normalize_traffic_attribution(traffic)
     with db() as conn:
         existing = conn.execute("select * from catalog_sessions where session_id = ?", (session_id,)).fetchone()
         if not existing:
             conn.execute(
                 """
-                insert into catalog_sessions(session_id, chat_id, username, name, opened_at, last_seen_at, had_lead)
-                values (?, ?, ?, ?, ?, ?, ?)
+                insert into catalog_sessions(
+                  session_id, chat_id, username, name, opened_at, last_seen_at, had_lead,
+                  traffic_source, traffic_medium, traffic_campaign, landing_page, referrer
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, chat_id, username, name, now, now, 1 if had_lead else 0),
+                (
+                    session_id, chat_id, username, name, now, now, 1 if had_lead else 0,
+                    traffic.get("source"), traffic.get("medium"), traffic.get("campaign"),
+                    traffic.get("landing_page"), traffic.get("referrer"),
+                ),
             )
             existing = conn.execute("select * from catalog_sessions where session_id = ?", (session_id,)).fetchone()
         if event_type == "catalog_close":
@@ -5281,10 +5412,19 @@ def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, 
                     last_seen_at=?,
                     closed_at=?,
                     duration_seconds=?,
-                    had_lead=max(had_lead, ?)
+                    had_lead=max(had_lead, ?),
+                    traffic_source=coalesce(nullif(traffic_source, ''), ?),
+                    traffic_medium=coalesce(nullif(traffic_medium, ''), ?),
+                    traffic_campaign=coalesce(nullif(traffic_campaign, ''), ?),
+                    landing_page=coalesce(nullif(landing_page, ''), ?),
+                    referrer=coalesce(nullif(referrer, ''), ?)
                 where session_id=?
                 """,
-                (chat_id, username, name, now, now, duration, 1 if had_lead else 0, session_id),
+                (
+                    chat_id, username, name, now, now, duration, 1 if had_lead else 0,
+                    traffic.get("source"), traffic.get("medium"), traffic.get("campaign"),
+                    traffic.get("landing_page"), traffic.get("referrer"), session_id,
+                ),
             )
         else:
             conn.execute(
@@ -5294,10 +5434,19 @@ def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, 
                     username=coalesce(?, username),
                     name=coalesce(nullif(?, ''), name),
                     last_seen_at=?,
-                    had_lead=max(had_lead, ?)
+                    had_lead=max(had_lead, ?),
+                    traffic_source=coalesce(nullif(traffic_source, ''), ?),
+                    traffic_medium=coalesce(nullif(traffic_medium, ''), ?),
+                    traffic_campaign=coalesce(nullif(traffic_campaign, ''), ?),
+                    landing_page=coalesce(nullif(landing_page, ''), ?),
+                    referrer=coalesce(nullif(referrer, ''), ?)
                 where session_id=?
                 """,
-                (chat_id, username, name, now, 1 if had_lead else 0, session_id),
+                (
+                    chat_id, username, name, now, 1 if had_lead else 0,
+                    traffic.get("source"), traffic.get("medium"), traffic.get("campaign"),
+                    traffic.get("landing_page"), traffic.get("referrer"), session_id,
+                ),
             )
 
 
@@ -5316,7 +5465,16 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
         username = tg_user.get("username")
         name = catalog_user_name(tg_user)
     session_id = catalog_session_id(payload)
-    upsert_catalog_session(session_id, event_type, chat_id, username, name, had_lead=event_type == "catalog_lead")
+    traffic = normalize_traffic_attribution((payload or {}).get("traffic"))
+    upsert_catalog_session(
+        session_id,
+        event_type,
+        chat_id,
+        username,
+        name,
+        had_lead=event_type == "catalog_lead",
+        traffic=traffic,
+    )
     if event_type == "catalog_close":
         send_catalog_followup_for_session_async(session_id)
     with db() as conn:
@@ -5341,30 +5499,44 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
             "\n".join(
                 [
                     "Пользователь открыл каталог",
-                    f"Клиент: {name or 'не определён'}",
-                    f"Telegram: @{username}" if username else f"Telegram ID: {chat_id}" if chat_id else "Источник: мини-апп / браузер",
+                    f"Клиент: {name or 'Веб-пользователь'}",
+                    f"Telegram: @{username}" if username else f"Telegram ID: {chat_id}" if chat_id else f"Источник: {traffic_source_label(traffic)}",
                 ]
             )
         )
     return event_id
 
 
-def create_web_lead(project_id, name, contact, message, tg_user=None, session_id=None, source="Мини-приложение"):
+def create_web_lead(project_id, name, contact, message, tg_user=None, session_id=None, source="Мини-приложение", traffic=None):
     project = get_project(project_id) if project_id else None
+    traffic = normalize_traffic_attribution(traffic)
     with db() as conn:
         cur = conn.execute(
             """
-            insert into web_leads(project_id, name, contact_value, message, created_at)
-            values (?, ?, ?, ?, ?)
+            insert into web_leads(
+              project_id, name, contact_value, message, traffic_source, traffic_medium,
+              traffic_campaign, landing_page, referrer, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (project_id if project else None, name, contact, message, iso_now()),
+            (
+                project_id if project else None, name, contact, message,
+                traffic.get("source"), traffic.get("medium"), traffic.get("campaign"),
+                traffic.get("landing_page"), traffic.get("referrer"), iso_now(),
+            ),
         )
         lead_id = cur.lastrowid
     record_catalog_event(
         "blog_lead" if source == "Блог" else "catalog_lead",
         project_id=project_id,
         tg_user=tg_user,
-        payload={"lead_id": lead_id, "name": name, "contact": contact, "message": message, "session_id": session_id},
+        payload={
+            "lead_id": lead_id,
+            "name": name,
+            "contact": contact,
+            "message": message,
+            "session_id": session_id,
+            "traffic": traffic,
+        },
     )
     notify_admin(
         "\n".join(
@@ -5373,6 +5545,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
                 f"Лот: {project['title'] if project else 'не выбран'}",
                 f"Клиент: {name or 'не указано'}",
                 f"Контакт: {contact}",
+                f"Источник: {traffic_source_label(traffic)}",
                 f"Комментарий: {message}" if message else "",
             ]
         ).strip()
@@ -5394,7 +5567,7 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
         client_name=name or "",
         contact_value=contact,
         request=message or (project["district"] if project else ""),
-        source=source,
+        source=f"{source} · {traffic_source_label(traffic)}",
     )
     return lead_id
 
@@ -5904,9 +6077,12 @@ def get_statistics_data(period):
               ce.event_type,
               p.title,
               p.district,
-              coalesce(nullif(ce.name, ''), ce.username, ce.chat_id, 'Не определён') client_name,
+              coalesce(nullif(ce.name, ''), ce.username, ce.chat_id, 'Веб-пользователь') client_name,
               ce.username,
-              ce.chat_id
+              ce.chat_id,
+              coalesce(nullif(json_extract(ce.payload, '$.traffic.source'), ''), 'Источник ранее не сохранялся') traffic_source,
+              coalesce(nullif(json_extract(ce.payload, '$.traffic.medium'), ''), '') traffic_medium,
+              coalesce(nullif(json_extract(ce.payload, '$.traffic.campaign'), ''), '') traffic_campaign
             from catalog_events ce
             left join projects p on p.id = ce.project_id
             where ce.event_type != 'catalog_heartbeat'{catalog_filter}
@@ -5927,9 +6103,14 @@ def get_statistics_data(period):
               followup_variant,
               followup_answer,
               followup_answered_at,
-              coalesce(nullif(name, ''), username, chat_id, 'Не определён') client_name,
+              coalesce(nullif(name, ''), username, chat_id, 'Веб-пользователь') client_name,
               username,
-              chat_id
+              chat_id,
+              coalesce(nullif(traffic_source, ''), 'Источник ранее не сохранялся') traffic_source,
+              coalesce(traffic_medium, '') traffic_medium,
+              coalesce(traffic_campaign, '') traffic_campaign,
+              coalesce(landing_page, '') landing_page,
+              coalesce(referrer, '') referrer
             from catalog_sessions
             where 1=1{session_filter}
             order by opened_at desc
@@ -6047,7 +6228,8 @@ def statistics_page(query=None):
         <tr>
           <td>{escape(row['created_at'])}</td>
           <td>{escape(event_label(row['event_type']))}</td>
-          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Веб'}</span></td>
+          <td>{escape(row['traffic_source'])}<br><span class="muted">{escape(' / '.join(part for part in (row['traffic_medium'], row['traffic_campaign']) if part))}</span></td>
           <td>{escape(row['title'] or 'Без лота')}<br><span class="muted">{escape(row['district'])}</span></td>
         </tr>
         """
@@ -6057,7 +6239,8 @@ def statistics_page(query=None):
         f"""
         <tr>
           <td>{escape(row['opened_at'])}<br><span class="muted">Закрыт: {escape(row['closed_at'] or '')}</span></td>
-          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Без Telegram data'}</span></td>
+          <td><strong>{escape(row['client_name'])}</strong><br><span class="muted">{'@' + escape(row['username']) if row['username'] else 'Telegram ID: ' + escape(row['chat_id']) if row['chat_id'] else 'Веб'}</span></td>
+          <td>{escape(row['traffic_source'])}<br><span class="muted">{escape(' / '.join(part for part in (row['traffic_medium'], row['traffic_campaign']) if part))}</span></td>
           <td>{format_duration(row['duration_seconds'])}</td>
           <td>{'Да' if row['had_lead'] else 'Нет'}</td>
           <td>{escape(row['followup_sent_at'] or '')}<br><span class="muted">{escape(followup_variant_label(row['followup_variant']))}</span></td>
@@ -6173,11 +6356,11 @@ def statistics_page(query=None):
     </div>
     <div class="panel">
       <h2>События каталога</h2>
-      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Событие</th><th>Пользователь</th><th>Лот</th></tr></thead><tbody>{catalog_rows or '<tr><td colspan="4" class="muted">Событий каталога пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Событие</th><th>Пользователь</th><th>Источник</th><th>Лот</th></tr></thead><tbody>{catalog_rows or '<tr><td colspan="5" class="muted">Событий каталога пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Сессии каталога</h2>
-      <div class="table-scroll"><table><thead><tr><th>Открытие / закрытие</th><th>Пользователь</th><th>Время</th><th>Заявка</th><th>Follow-up</th><th>Ответ</th></tr></thead><tbody>{catalog_session_rows or '<tr><td colspan="6" class="muted">Сессий каталога пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Открытие / закрытие</th><th>Пользователь</th><th>Источник</th><th>Время</th><th>Заявка</th><th>Follow-up</th><th>Ответ</th></tr></thead><tbody>{catalog_session_rows or '<tr><td colspan="7" class="muted">Сессий каталога пока нет.</td></tr>'}</tbody></table></div>
     </div>
     <div class="panel">
       <h2>Кто видел лоты</h2>
@@ -6252,7 +6435,7 @@ def build_statistics_xlsx(period):
                 conversion(row["web_leads"], row["catalog_views"]),
             ]
         )
-    catalog_rows = [["Дата", "Событие", "Пользователь", "Username", "Telegram ID", "Лот", "Район"]]
+    catalog_rows = [["Дата", "Событие", "Пользователь", "Username", "Telegram ID", "Источник", "Канал", "Кампания", "Лот", "Район"]]
     for row in data["catalog_rows"]:
         catalog_rows.append(
             [
@@ -6261,11 +6444,14 @@ def build_statistics_xlsx(period):
                 row["client_name"],
                 f"@{row['username']}" if row["username"] else "",
                 row["chat_id"] or "",
+                row["traffic_source"],
+                row["traffic_medium"],
+                row["traffic_campaign"],
                 row["title"] or "Без лота",
                 row["district"] or "",
             ]
         )
-    catalog_session_rows = [["Открытие", "Закрытие", "Длительность", "Пользователь", "Username", "Telegram ID", "Была заявка", "Follow-up отправлен", "A/B вариант", "Ответ", "Дата ответа"]]
+    catalog_session_rows = [["Открытие", "Закрытие", "Длительность", "Пользователь", "Username", "Telegram ID", "Источник", "Канал", "Кампания", "Посадочная", "Реферер", "Была заявка", "Follow-up отправлен", "A/B вариант", "Ответ", "Дата ответа"]]
     for row in data["catalog_session_rows"]:
         catalog_session_rows.append(
             [
@@ -6275,6 +6461,11 @@ def build_statistics_xlsx(period):
                 row["client_name"],
                 f"@{row['username']}" if row["username"] else "",
                 row["chat_id"] or "",
+                row["traffic_source"],
+                row["traffic_medium"],
+                row["traffic_campaign"],
+                row["landing_page"],
+                row["referrer"],
                 "Да" if row["had_lead"] else "Нет",
                 row["followup_sent_at"] or "",
                 followup_variant_label(row["followup_variant"]),
@@ -7263,6 +7454,7 @@ def leads_page():
           <td><strong>{escape(l['name'] or 'Не указано')}</strong></td>
           <td>{escape(l['project_title'] or 'Лот не выбран / удалён')}</td>
           <td>{escape(l['contact_value'])}</td>
+          <td>{escape(l['traffic_source'] or 'Источник ранее не сохранялся')}<br><span class="muted">{escape(' / '.join(part for part in (l['traffic_medium'], l['traffic_campaign']) if part))}</span></td>
           <td>{escape(l['message'])}</td>
           <td>
             <form method="post" action="/web-lead/status" class="actions">
@@ -7284,7 +7476,7 @@ def leads_page():
         f"""
         <div class="panel">
           <h2>Заявки из мини-приложения</h2>
-          <table><thead><tr><th>Дата</th><th>Клиент</th><th>Лот</th><th>Контакт</th><th>Комментарий</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{web_rows or '<tr><td colspan="7" class="muted">Заявок из мини-приложения пока нет.</td></tr>'}</tbody></table>
+          <table><thead><tr><th>Дата</th><th>Клиент</th><th>Лот</th><th>Контакт</th><th>Источник</th><th>Комментарий</th><th>Статус</th><th>Удалить</th></tr></thead><tbody>{web_rows or '<tr><td colspan="8" class="muted">Заявок из мини-приложения пока нет.</td></tr>'}</tbody></table>
         </div>
         <div class="panel">
           <h2>Заявки на персональный подбор</h2>
@@ -8038,6 +8230,7 @@ class Handler(BaseHTTPRequestHandler):
             contact = form_value(form, "contact").strip()
             message = form_value(form, "message").strip()
             session_id = form_value(form, "catalog_session_id").strip()[:80]
+            traffic = parse_traffic_attribution(form_value(form, "traffic_attribution"))
             tg_user = None
             tg_user_raw = form_value(form, "tg_user_json").strip()
             if tg_user_raw:
@@ -8051,7 +8244,7 @@ class Handler(BaseHTTPRequestHandler):
                 base_path = "/en" if path == "/en/lead" else ("/ru" if path == "/ru/lead" else ("" if path == "/lead" else "/app"))
                 self.send_html(app_project_page(project_id, error_message, base_path=base_path, lang=lang), status=400)
                 return
-            create_web_lead(project_id, name, contact, message, tg_user=tg_user, session_id=session_id)
+            create_web_lead(project_id, name, contact, message, tg_user=tg_user, session_id=session_id, traffic=traffic)
             base_path = "/en" if path == "/en/lead" else ("/ru" if path == "/ru/lead" else ("" if path == "/lead" else "/app"))
             success_message = (
                 "Thank you, your request has been sent. @roi_counter will contact you."
@@ -8092,11 +8285,12 @@ class Handler(BaseHTTPRequestHandler):
             name = form_value(form, "name").strip()
             contact = form_value(form, "contact").strip()
             message = form_value(form, "message").strip()
+            traffic = parse_traffic_attribution(form_value(form, "traffic_attribution"))
             if not contact:
                 self.redirect(f"{article_path}?lead=missing#consultation")
                 return
             full_message = f"Статья: {article_config['label']}\n{message}".strip()
-            create_web_lead(None, name, contact, full_message, source="Блог")
+            create_web_lead(None, name, contact, full_message, source="Блог", traffic=traffic)
             self.redirect(f"{article_path}?lead=success#consultation")
             return
 
