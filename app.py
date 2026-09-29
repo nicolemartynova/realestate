@@ -3155,6 +3155,7 @@ def app_layout(
           }});
         }} else if (eventName === 'lead_submit') {{
           window.oaiq('measure', 'lead_created', {{type: 'customer_action'}});
+          window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'lead'}});
         }} else if (eventName === 'lot_share') {{
           window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'lot_shared'}});
         }}
@@ -4721,7 +4722,10 @@ def article_lead_form(lang="ru", article_slug="payment-default"):
           try {{ window.ym(Number({json.dumps(YANDEX_METRIKA_ID or '0')}), 'reachGoal', 'lead_submit', details); }} catch (e) {{}}
         }}
         if (typeof window.oaiq === 'function') {{
-          try {{ window.oaiq('measure', 'lead_created', {{type: 'customer_action'}}); }} catch (e) {{}}
+          try {{
+            window.oaiq('measure', 'lead_created', {{type: 'customer_action'}});
+            window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'lead'}});
+          }} catch (e) {{}}
         }}
       }});
     }})();
