@@ -50,6 +50,7 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "belowmarketdubaibot")
 YANDEX_METRIKA_ID = os.environ.get("YANDEX_METRIKA_ID", "112517412").strip()
 YANDEX_METRIKA_TOKEN = os.environ.get("YANDEX_METRIKA_TOKEN", "").strip()
 GOOGLE_TAG_MANAGER_ID = os.environ.get("GOOGLE_TAG_MANAGER_ID", "GTM-WFTHTSHF").strip()
+OPENAI_ADS_PIXEL_ID = os.environ.get("OPENAI_ADS_PIXEL_ID", "NJuWAphvbMfV5yBHeQHU6x").strip()
 
 SEND_WINDOW_START = dt_time(9, 0)
 SEND_WINDOW_END = dt_time(21, 0)
@@ -2847,6 +2848,22 @@ def gtm_body():
   <!-- End Google Tag Manager (noscript) -->"""
 
 
+def openai_ads_pixel_head():
+    if not OPENAI_ADS_PIXEL_ID:
+        return ""
+    pixel_id = json.dumps(OPENAI_ADS_PIXEL_ID)
+    return f"""
+  <!-- OpenAI Ads Measurement Pixel -->
+  <script>
+  !function(w,d,s,u){{if(w.oaiq)return;var q=function(){{q.q.push(arguments)}};q.q=[];w.oaiq=q;
+    var j=d.createElement(s);j.async=1;j.src=u;var f=d.getElementsByTagName(s)[0];f.parentNode.insertBefore(j,f)
+  }}(window,document,"script","https://bzrcdn.openai.com/sdk/oaiq.min.js");
+  oaiq("init",{{pixelId:{pixel_id},debug:true}});
+  oaiq("measure","page_viewed",{{type:"contents"}});
+  </script>
+  <!-- End OpenAI Ads Measurement Pixel -->"""
+
+
 def public_url(path="/"):
     if not PUBLIC_BASE_URL:
         return path
@@ -3040,9 +3057,30 @@ def app_layout(
       }}, params || {{}});
       window.dataLayer.push(eventPayload);
     }}
+    function openaiAdsEvent(eventName, params) {{
+      if (typeof window.oaiq !== 'function') return;
+      try {{
+        if (eventName === 'lot_view') {{
+          window.oaiq('measure', 'contents_viewed', {{
+            type: 'contents',
+            contents: [{{
+              id: String((params && params.lot_id) || ''),
+              name: [params && params.building, params && params.rooms].filter(Boolean).join(' - ') || document.title,
+              content_type: 'product',
+              quantity: 1
+            }}]
+          }});
+        }} else if (eventName === 'lead_submit') {{
+          window.oaiq('measure', 'lead_created', {{type: 'customer_action'}});
+        }} else if (eventName === 'lot_share') {{
+          window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'lot_shared'}});
+        }}
+      }} catch (e) {{}}
+    }}
     function analyticsEvent(eventName, params) {{
       metrikaGoal(eventName, params);
       gtmEvent(eventName, params);
+      openaiAdsEvent(eventName, params);
     }}
     if ({json.dumps(catalog_event)} === 'catalog_lot_view') {{
       analyticsEvent('lot_view', metrikaProject);
@@ -3144,6 +3182,7 @@ def app_layout(
   <meta property="og:url" content="{escape(canonical_url)}">
   {og_image_tag}
   {structured_data_html}
+  {openai_ads_pixel_head()}
   {gtm_head()}
   {metrika_head()}
   <style>{APP_CSS}</style>
