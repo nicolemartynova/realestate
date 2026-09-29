@@ -3438,8 +3438,8 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         """
     if lang == "en":
         title = "Below-market property in Dubai | Below Market UAE"
-        h1 = "Below-market property lots in Dubai"
-        intro = "Choose an area, budget, and property format. Request details on a lot you like, and @roi_counter will contact you."
+        h1 = "Below-market property in Dubai"
+        intro = "Choose an area, budget, and property format. Request details on a property you like, and @roi_counter will contact you."
         guide_text = "How to find below-market property in Dubai: a guide by Below Market UAE"
         blog_path = EN_BLOG_PATH
         blog_text = "Dubai property insights"
@@ -3447,12 +3447,12 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         max_price_placeholder = "Price up to, AED"
         find_label = "Search"
         reset_label = "Reset"
-        empty_text = "There are no active lots for the selected filters. Try changing filters or request a personal selection."
-        description = "Below Market UAE catalog: current Dubai property lots below market price, distress deals, urgent sales, and investment opportunities."
+        empty_text = "There are no active properties for the selected filters. Try changing filters or request a personal selection."
+        description = "Below Market UAE catalog: current Dubai properties below market price, distress deals, urgent sales, and investment opportunities."
     else:
         title = "Недвижимость в Дубае ниже рынка | Below Market UAE"
-        h1 = "Лоты недвижимости в Дубае ниже рынка"
-        intro = "Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся лоту, и @roi_counter свяжется с вами."
+        h1 = "Недвижимость в Дубае ниже рынка"
+        intro = "Выберите район, бюджет и формат объекта. Оставьте заявку по понравившемуся объекту, и @roi_counter свяжется с вами."
         guide_text = "Как находить недвижимость в Дубае ниже рынка: guide от Below Market UAE"
         blog_path = RU_BLOG_PATH
         blog_text = "Блог о недвижимости Дубая"
@@ -3460,8 +3460,8 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         max_price_placeholder = "Цена до, AED"
         find_label = "Найти"
         reset_label = "Сбросить"
-        empty_text = "По выбранным параметрам активных лотов нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор."
-        description = "Каталог Below Market UAE: актуальные лоты недвижимости в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты."
+        empty_text = "По выбранным параметрам активной недвижимости нет. Попробуйте изменить фильтры или оставьте заявку на персональный подбор."
+        description = "Каталог Below Market UAE: актуальная недвижимость в Дубае ниже рынка, distress deals, срочные продажи и инвестиционные объекты."
     district_map_json = json.dumps(districts_by_city, ensure_ascii=False).replace("</", "<\\/")
     all_districts_json = json.dumps(all_districts, ensure_ascii=False).replace("</", "<\\/")
     all_areas_label = "All areas" if lang == "en" else "Все районы"
@@ -3560,7 +3560,7 @@ def bot_teaser_page():
             select * from projects
             where status='active'
             order by updated_at desc, id desc
-            limit 3
+            limit 21
             """
         ).fetchall()
 
@@ -3580,20 +3580,34 @@ def bot_teaser_page():
                 <strong>{escape(project_display_name(project, "ru"))}</strong>
                 <span>{escape(project['district'])}</span>
               </div>
-              <div class="teaser-lock"><span>Лот доступен в боте</span></div>
+              <div class="teaser-lock"><span>Недвижимость доступна в боте</span></div>
             </article>
             """
         )
-    while len(cards) < 3:
+    while len(cards) < 21:
         cards.append(
             """
             <article class="teaser-card teaser-empty" aria-hidden="true">
               <div class="teaser-placeholder"></div>
-              <div class="teaser-card-copy"><strong>Новый лот</strong><span>Dubai</span></div>
-              <div class="teaser-lock"><span>Лот доступен в боте</span></div>
+              <div class="teaser-card-copy"><strong>Новый объект</strong><span>Dubai</span></div>
+              <div class="teaser-lock"><span>Недвижимость доступна в боте</span></div>
             </article>
             """
         )
+    first_row = cards[:7]
+    second_row = cards[7:14]
+    third_row = cards[14:21]
+    marquee_rows = f"""
+      <div class="teaser-marquee">
+        <div class="teaser-track">{''.join(first_row + first_row)}</div>
+      </div>
+      <div class="teaser-marquee teaser-marquee-reverse">
+        <div class="teaser-track">{''.join(second_row + second_row)}</div>
+      </div>
+      <div class="teaser-marquee teaser-marquee-third">
+        <div class="teaser-track">{''.join(third_row + third_row)}</div>
+      </div>
+    """
 
     bot_url = f"https://t.me/{BOT_USERNAME}?start=web_teaser"
     styles = r"""
@@ -3601,20 +3615,26 @@ def bot_teaser_page():
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; color: #15251f; background: #f2f5f1; }
     .teaser-shell { min-height: 100vh; display: grid; align-items: center; padding: 24px 20px; }
-    .teaser-main { width: min(1040px, 100%); margin: 0 auto; text-align: center; }
+    .teaser-main { width: min(1180px, 100%); margin: 0 auto; overflow: hidden; text-align: center; }
     .teaser-brand { margin: 0 0 16px; color: #23634f; font-size: 14px; font-weight: 800; text-transform: uppercase; }
     h1 { max-width: 760px; margin: 0 auto; font-size: clamp(36px, 5vw, 60px); line-height: 1.02; letter-spacing: 0; }
     .teaser-intro { max-width: 620px; margin: 16px auto 20px; color: #5b6863; font-size: 18px; line-height: 1.5; }
-    .teaser-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 0 auto 20px; }
-    .teaser-card { position: relative; height: 240px; overflow: hidden; border: 1px solid #d6ddd9; border-radius: 8px; background: #d8dfdb; text-align: left; }
-    .teaser-card img, .teaser-placeholder { width: 100%; height: 100%; min-height: 240px; object-fit: cover; display: block; filter: blur(12px) saturate(.75); transform: scale(1.08); }
+    .teaser-grid { position: relative; display: grid; gap: 10px; margin: 0 auto 20px; overflow: hidden; mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent); -webkit-mask-image: linear-gradient(to right, transparent, black 8%, black 92%, transparent); }
+    .teaser-marquee { overflow: hidden; }
+    .teaser-track { display: flex; gap: 10px; width: max-content; animation: teaser-scroll 32s linear infinite; will-change: transform; }
+    .teaser-marquee-reverse .teaser-track { animation-direction: reverse; animation-duration: 38s; transform: translateX(-50%); }
+    .teaser-marquee-third .teaser-track { animation-duration: 35s; }
+    .teaser-grid:hover .teaser-track { animation-play-state: paused; }
+    .teaser-card { position: relative; flex: 0 0 190px; width: 190px; height: 116px; overflow: hidden; border: 1px solid rgba(255,255,255,.8); border-radius: 8px; background: #d8dfdb; box-shadow: 0 8px 20px rgba(22,43,34,.1); text-align: left; }
+    .teaser-card img, .teaser-placeholder { width: 100%; height: 100%; min-height: 116px; object-fit: cover; display: block; filter: blur(2.5px) saturate(.88); transform: scale(1.035); }
     .teaser-placeholder { background: linear-gradient(145deg, #ccd5d0, #9caea5); }
-    .teaser-card-copy { position: absolute; inset: auto 0 0; padding: 52px 18px 18px; background: linear-gradient(transparent, rgba(10,25,19,.88)); color: white; filter: blur(4px); }
+    .teaser-card-copy { position: absolute; inset: auto 0 0; padding: 38px 12px 10px; background: linear-gradient(transparent, rgba(10,25,19,.88)); color: white; filter: blur(2px); }
     .teaser-card-copy strong, .teaser-card-copy span { display: block; }
-    .teaser-card-copy strong { font-size: 20px; }
+    .teaser-card-copy strong { font-size: 15px; }
     .teaser-card-copy span { margin-top: 6px; opacity: .78; }
-    .teaser-lock { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(13,30,23,.23); }
-    .teaser-lock span { max-width: 210px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.75); border-radius: 6px; color: white; background: rgba(12,29,22,.72); font-size: 15px; font-weight: 750; text-align: center; }
+    .teaser-lock { position: absolute; inset: 0; display: grid; place-items: center; padding: 10px; background: linear-gradient(180deg, rgba(13,30,23,.02), rgba(13,30,23,.2)); }
+    .teaser-lock span { max-width: 170px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.72); border-radius: 6px; color: white; background: rgba(12,29,22,.66); backdrop-filter: blur(4px); font-size: 11px; font-weight: 750; text-align: center; }
+    @keyframes teaser-scroll { from { transform: translateX(0); } to { transform: translateX(calc(-50% - 5px)); } }
     .bot-button { display: inline-flex; min-height: 56px; align-items: center; justify-content: center; padding: 15px 26px; border-radius: 6px; background: #23634f; color: white; font-size: 17px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 25px rgba(35,99,79,.2); }
     .bot-button:hover { background: #194d3d; }
     .teaser-note { margin: 14px 0 0; color: #74817c; font-size: 14px; }
@@ -3622,11 +3642,15 @@ def bot_teaser_page():
       .teaser-shell { align-items: start; padding: 28px 16px 32px; }
       h1 { font-size: 40px; }
       .teaser-intro { margin-top: 18px; font-size: 17px; }
-      .teaser-grid { grid-template-columns: 1fr; gap: 10px; }
-      .teaser-card { height: 170px; }
-      .teaser-card img, .teaser-placeholder { min-height: 170px; }
-      .teaser-card:nth-child(n+3) { display: none; }
+      .teaser-grid { gap: 8px; margin-bottom: 18px; mask-image: linear-gradient(to right, transparent, black 4%, black 96%, transparent); -webkit-mask-image: linear-gradient(to right, transparent, black 4%, black 96%, transparent); }
+      .teaser-track { gap: 8px; animation-duration: 28s; }
+      .teaser-card { flex-basis: 150px; width: 150px; height: 92px; }
+      .teaser-card img, .teaser-placeholder { min-height: 92px; }
+      .teaser-lock span { max-width: 126px; padding: 7px; font-size: 10px; }
       .bot-button { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .teaser-track { animation-play-state: paused; }
     }
     """
     event_script = f"""
@@ -3682,7 +3706,7 @@ def bot_teaser_page():
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
-  <title>Лоты ниже рынка в Telegram | Below Market Dubai</title>
+  <title>Недвижимость ниже рынка в Telegram | Below Market Dubai</title>
   <style>{styles}</style>
   {gtm_head()}
   {metrika_head()}
@@ -3693,11 +3717,11 @@ def bot_teaser_page():
   <div class="teaser-shell">
     <main class="teaser-main">
       <p class="teaser-brand">Below Market Dubai</p>
-      <h1>Лоты ниже рынка уже в Telegram</h1>
+      <h1>Недвижимость ниже рынка уже в Telegram</h1>
       <p class="teaser-intro">Актуальные цены, фотографии и детали объектов доступны только в нашем боте.</p>
-      <section class="teaser-grid" aria-label="Тизеры лотов">{''.join(cards)}</section>
-      <a class="bot-button" id="open-bot" href="{escape(bot_url)}">Открыть лоты в Telegram</a>
-      <p class="teaser-note">Все актуальные лоты и обновления — в боте @belowmarketdubaibot</p>
+      <section class="teaser-grid" aria-label="Тизеры недвижимости">{marquee_rows}</section>
+      <a class="bot-button" id="open-bot" href="{escape(bot_url)}">Открыть недвижимость в Telegram</a>
+      <p class="teaser-note">Вся актуальная недвижимость и обновления — в боте @belowmarketdubaibot</p>
     </main>
   </div>
   {traffic_attribution_script()}
