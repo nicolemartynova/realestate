@@ -72,6 +72,7 @@ METRIKA_GOALS = [
     ("lot_view", "Просмотр лота"),
     ("lot_share", "Поделиться лотом"),
     ("lead_submit", "Хочу узнать подробнее"),
+    ("bot_click", "Переход в Telegram-бот"),
 ]
 LEAD_STATUS_LABELS = dict(LEAD_STATUSES)
 SUBSCRIBER_STATUSES = [
@@ -126,6 +127,8 @@ EVENT_LABELS = {
     "catalog_close": "Закрыл каталог",
     "catalog_followup_yes": "Каталог follow-up: Да",
     "catalog_followup_no": "Каталог follow-up: Нет",
+    "landing_bot_click": "Тизер: клик в Telegram-бот",
+    "start_web_teaser": "Запустил бота после тизера",
     "start_shared_lot": "Открыл лот по deep link",
 }
 
@@ -1786,6 +1789,10 @@ def create_personal_lead_async(chat_id, user, method=None, value=None):
 
 def handle_start(chat_id, user, payload=""):
     upsert_subscriber(user, chat_id)
+    if payload == "web_teaser":
+        log_event(chat_id, user, "start_web_teaser", payload=payload)
+        send_welcome_message(chat_id)
+        return
     if payload.startswith("lot_"):
         try:
             project_id = int(payload.split("_", 1)[1])
@@ -3544,6 +3551,159 @@ def app_deal_tags(project, lang="ru"):
     if project["distress"]:
         tags.append(("Distress" if lang == "en" else "Дистресс", "distress-tag"))
     return tags
+
+
+def bot_teaser_page():
+    with db() as conn:
+        projects = conn.execute(
+            """
+            select * from projects
+            where status='active'
+            order by updated_at desc, id desc
+            limit 3
+            """
+        ).fetchall()
+
+    cards = []
+    for project in projects:
+        cover = project_cover(project["id"])
+        image = (
+            f'<img src="{escape(cover)}" alt="" loading="eager">'
+            if cover
+            else '<div class="teaser-placeholder"></div>'
+        )
+        cards.append(
+            f"""
+            <article class="teaser-card" aria-hidden="true">
+              {image}
+              <div class="teaser-card-copy">
+                <strong>{escape(project_display_name(project, "ru"))}</strong>
+                <span>{escape(project['district'])}</span>
+              </div>
+              <div class="teaser-lock"><span>Лот доступен в боте</span></div>
+            </article>
+            """
+        )
+    while len(cards) < 3:
+        cards.append(
+            """
+            <article class="teaser-card teaser-empty" aria-hidden="true">
+              <div class="teaser-placeholder"></div>
+              <div class="teaser-card-copy"><strong>Новый лот</strong><span>Dubai</span></div>
+              <div class="teaser-lock"><span>Лот доступен в боте</span></div>
+            </article>
+            """
+        )
+
+    bot_url = f"https://t.me/{BOT_USERNAME}?start=web_teaser"
+    styles = r"""
+    :root { color-scheme: light; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #15251f; background: #f2f5f1; }
+    .teaser-shell { min-height: 100vh; display: grid; align-items: center; padding: 24px 20px; }
+    .teaser-main { width: min(1040px, 100%); margin: 0 auto; text-align: center; }
+    .teaser-brand { margin: 0 0 16px; color: #23634f; font-size: 14px; font-weight: 800; text-transform: uppercase; }
+    h1 { max-width: 760px; margin: 0 auto; font-size: clamp(36px, 5vw, 60px); line-height: 1.02; letter-spacing: 0; }
+    .teaser-intro { max-width: 620px; margin: 16px auto 20px; color: #5b6863; font-size: 18px; line-height: 1.5; }
+    .teaser-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 0 auto 20px; }
+    .teaser-card { position: relative; height: 240px; overflow: hidden; border: 1px solid #d6ddd9; border-radius: 8px; background: #d8dfdb; text-align: left; }
+    .teaser-card img, .teaser-placeholder { width: 100%; height: 100%; min-height: 240px; object-fit: cover; display: block; filter: blur(12px) saturate(.75); transform: scale(1.08); }
+    .teaser-placeholder { background: linear-gradient(145deg, #ccd5d0, #9caea5); }
+    .teaser-card-copy { position: absolute; inset: auto 0 0; padding: 52px 18px 18px; background: linear-gradient(transparent, rgba(10,25,19,.88)); color: white; filter: blur(4px); }
+    .teaser-card-copy strong, .teaser-card-copy span { display: block; }
+    .teaser-card-copy strong { font-size: 20px; }
+    .teaser-card-copy span { margin-top: 6px; opacity: .78; }
+    .teaser-lock { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(13,30,23,.23); }
+    .teaser-lock span { max-width: 210px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.75); border-radius: 6px; color: white; background: rgba(12,29,22,.72); font-size: 15px; font-weight: 750; text-align: center; }
+    .bot-button { display: inline-flex; min-height: 56px; align-items: center; justify-content: center; padding: 15px 26px; border-radius: 6px; background: #23634f; color: white; font-size: 17px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 25px rgba(35,99,79,.2); }
+    .bot-button:hover { background: #194d3d; }
+    .teaser-note { margin: 14px 0 0; color: #74817c; font-size: 14px; }
+    @media (max-width: 720px) {
+      .teaser-shell { align-items: start; padding: 28px 16px 32px; }
+      h1 { font-size: 40px; }
+      .teaser-intro { margin-top: 18px; font-size: 17px; }
+      .teaser-grid { grid-template-columns: 1fr; gap: 10px; }
+      .teaser-card { height: 170px; }
+      .teaser-card img, .teaser-placeholder { min-height: 170px; }
+      .teaser-card:nth-child(n+3) { display: none; }
+      .bot-button { width: 100%; }
+    }
+    """
+    event_script = f"""
+    <script>
+    (function() {{
+      var button = document.getElementById('open-bot');
+      if (!button) return;
+      button.addEventListener('click', function() {{
+        var traffic = window.__trafficAttribution || {{}};
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({{
+          event: 'bot_click',
+          click_target: 'telegram_bot',
+          page_path: window.location.pathname,
+          traffic_source: traffic.source || '',
+          traffic_medium: traffic.medium || '',
+          traffic_campaign: traffic.campaign || ''
+        }});
+        if (typeof window.ym === 'function' && {json.dumps(bool(YANDEX_METRIKA_ID))}) {{
+          try {{ window.ym(Number({json.dumps(YANDEX_METRIKA_ID or '0')}), 'reachGoal', 'bot_click', traffic); }} catch (e) {{}}
+        }}
+        if (typeof window.oaiq === 'function') {{
+          try {{ window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'bot_open_clicked'}}); }} catch (e) {{}}
+        }}
+        var sessionId = '';
+        try {{
+          sessionId = sessionStorage.getItem('teaser_session_id') || ('teaser-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+          sessionStorage.setItem('teaser_session_id', sessionId);
+        }} catch (e) {{ sessionId = 'teaser-' + Date.now(); }}
+        var body = JSON.stringify({{
+          event_type: 'landing_bot_click',
+          project_id: null,
+          tg_user: null,
+          path: window.location.pathname + window.location.search,
+          session_id: sessionId,
+          traffic: traffic,
+          visible: document.visibilityState || ''
+        }});
+        try {{
+          if (navigator.sendBeacon) {{
+            navigator.sendBeacon('/app/event', new Blob([body], {{type: 'application/json'}}));
+          }} else {{
+            fetch('/app/event', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: body, keepalive: true}});
+          }}
+        }} catch (e) {{}}
+      }});
+    }})();
+    </script>
+    """
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Лоты ниже рынка в Telegram | Below Market Dubai</title>
+  <style>{styles}</style>
+  {gtm_head()}
+  {metrika_head()}
+  {openai_ads_pixel_head()}
+</head>
+<body>
+  {gtm_body()}
+  <div class="teaser-shell">
+    <main class="teaser-main">
+      <p class="teaser-brand">Below Market Dubai</p>
+      <h1>Лоты ниже рынка уже в Telegram</h1>
+      <p class="teaser-intro">Актуальные цены, фотографии и детали объектов доступны только в нашем боте.</p>
+      <section class="teaser-grid" aria-label="Тизеры лотов">{''.join(cards)}</section>
+      <a class="bot-button" id="open-bot" href="{escape(bot_url)}">Открыть лоты в Telegram</a>
+      <p class="teaser-note">Все актуальные лоты и обновления — в боте @belowmarketdubaibot</p>
+    </main>
+  </div>
+  {traffic_attribution_script()}
+  {event_script}
+</body>
+</html>"""
 
 
 def app_project_page(project_id, message="", base_path="/app", lang="ru"):
@@ -5451,7 +5611,7 @@ def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, 
 
 
 def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None):
-    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close", "catalog_share"}:
+    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close", "catalog_share", "landing_bot_click"}:
         return None
     project = get_project(project_id) if project_id else None
     chat_id = None
@@ -5466,15 +5626,16 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
         name = catalog_user_name(tg_user)
     session_id = catalog_session_id(payload)
     traffic = normalize_traffic_attribution((payload or {}).get("traffic"))
-    upsert_catalog_session(
-        session_id,
-        event_type,
-        chat_id,
-        username,
-        name,
-        had_lead=event_type == "catalog_lead",
-        traffic=traffic,
-    )
+    if event_type.startswith("catalog_"):
+        upsert_catalog_session(
+            session_id,
+            event_type,
+            chat_id,
+            username,
+            name,
+            had_lead=event_type == "catalog_lead",
+            traffic=traffic,
+        )
     if event_type == "catalog_close":
         send_catalog_followup_for_session_async(session_id)
     with db() as conn:
@@ -6018,6 +6179,8 @@ def get_statistics_data(period):
             "clicks": conn.execute(f"select count(*) c from bot_events where event_type like 'click_%'{event_filter}", event_params).fetchone()["c"],
             "deep_link_opens": conn.execute(f"select count(*) c from bot_events where event_type = 'start_shared_lot'{event_filter}", event_params).fetchone()["c"],
             "deep_link_users": conn.execute(f"select count(distinct chat_id) c from bot_events where event_type = 'start_shared_lot'{event_filter}", event_params).fetchone()["c"],
+            "landing_bot_clicks": conn.execute(f"select count(*) c from catalog_events where event_type = 'landing_bot_click'{catalog_filter}", catalog_params).fetchone()["c"],
+            "web_teaser_starts": conn.execute(f"select count(*) c from bot_events where event_type = 'start_web_teaser'{event_filter}", event_params).fetchone()["c"],
             "deep_link_leads": conn.execute(
                 f"""
                 select count(distinct l.id) c
@@ -6342,6 +6505,11 @@ def statistics_page(query=None):
       <div class="metric"><strong>{overview['deep_link_leads']}</strong><span>заявок после deep link</span></div>
       <div class="metric"><strong>{conversion(overview['deep_link_leads'], overview['deep_link_opens'])}</strong><span>конверсия deep link</span></div>
     </section>
+    <section class="grid">
+      <div class="metric"><strong>{overview['landing_bot_clicks']}</strong><span>кликов в бот с тизера</span></div>
+      <div class="metric"><strong>{overview['web_teaser_starts']}</strong><span>запусков бота с тизера</span></div>
+      <div class="metric"><strong>{conversion(overview['web_teaser_starts'], overview['landing_bot_clicks'])}</strong><span>конверсия клика в запуск</span></div>
+    </section>
     <div class="panel">
       <h2>A/B тест follow-up</h2>
       <div class="table-scroll"><table><thead><tr><th>Вариант</th><th>Отправлено</th><th>Да</th><th>Нет</th><th>Конверсия в Да</th></tr></thead><tbody>{catalog_followup_ab_rows or '<tr><td colspan="5" class="muted">A/B данных пока нет.</td></tr>'}</tbody></table></div>
@@ -6384,6 +6552,9 @@ def build_statistics_xlsx(period):
         ["Новых подписчиков за период", overview["new_subscribers"]],
         ["Показов лотов", overview["shows"]],
         ["Кликов по кнопкам", overview["clicks"]],
+        ["Кликов в бот с тизера", overview["landing_bot_clicks"]],
+        ["Запусков бота с тизера", overview["web_teaser_starts"]],
+        ["Конверсия клика в запуск", conversion(overview["web_teaser_starts"], overview["landing_bot_clicks"])],
         ["Открытий каталога", overview["catalog_opens"]],
         ["Просмотров лотов в каталоге", overview["catalog_lot_views"]],
         ["Закрытий каталога", overview["catalog_closes"]],
@@ -8097,6 +8268,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect("/ru/nedvizhimost-v-dubae-nizhe-rynka")
             else:
                 self.redirect("/en/below-market-property-dubai")
+        elif path in ("/bot", "/bot/"):
+            self.send_html(bot_teaser_page())
         elif path == "/app":
             self.send_html(app_projects_page(query))
         elif path == "/app/lot":
