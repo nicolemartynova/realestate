@@ -2938,6 +2938,30 @@ def traffic_attribution_script():
   </script>"""
 
 
+def telegram_bot_click_tracking_script():
+    bot_path = "/" + BOT_USERNAME.lower().lstrip("@")
+    return f"""
+  <script>
+  (function() {{
+    var botPath = {json.dumps(bot_path)};
+    document.addEventListener('click', function(event) {{
+      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+      if (!link) return;
+      var url;
+      try {{ url = new URL(link.href, window.location.origin); }} catch (e) {{ return; }}
+      var host = url.hostname.toLowerCase();
+      var path = url.pathname.toLowerCase();
+      if (path.endsWith('/')) path = path.slice(0, -1);
+      if ((host !== 't.me' && host !== 'telegram.me') || path !== botPath) return;
+      if (typeof window.oaiq !== 'function') return;
+      try {{
+        window.oaiq('measure', 'custom', {{type: 'custom'}}, {{custom_event_name: 'bot'}});
+      }} catch (e) {{}}
+    }});
+  }})();
+  </script>"""
+
+
 def public_url(path="/"):
     if not PUBLIC_BASE_URL:
         return path
@@ -3279,6 +3303,7 @@ def app_layout(
   </main>
   {footer_html}
   {traffic_attribution_script()}
+  {telegram_bot_click_tracking_script()}
   {event_script}
 </body>
 </html>"""
@@ -3726,6 +3751,7 @@ def bot_teaser_page():
     </main>
   </div>
   {traffic_attribution_script()}
+  {telegram_bot_click_tracking_script()}
   {event_script}
 </body>
 </html>"""
