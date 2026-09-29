@@ -3491,6 +3491,47 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     district_map_json = json.dumps(districts_by_city, ensure_ascii=False).replace("</", "<\\/")
     all_districts_json = json.dumps(all_districts, ensure_ascii=False).replace("</", "<\\/")
     all_areas_label = "All areas" if lang == "en" else "Все районы"
+    subscription_popup = ""
+    if is_public_catalog:
+        popup_title = "New opportunities appear in Telegram first" if lang == "en" else "Новые предложения сначала появляются в Telegram"
+        popup_text = (
+            "Subscribe to the bot so you do not miss below-market properties and urgent offers."
+            if lang == "en"
+            else "Подпишитесь на бота, чтобы не пропустить недвижимость ниже рынка и срочные предложения."
+        )
+        popup_button = "Open catalog in Telegram" if lang == "en" else "Открыть каталог в Telegram"
+        popup_close = "Close" if lang == "en" else "Закрыть"
+        subscription_popup = f"""
+        <aside class="bot-subscribe" id="bot-subscribe" hidden aria-label="{escape(popup_title)}">
+          <button class="bot-subscribe-close" type="button" aria-label="{escape(popup_close)}" title="{escape(popup_close)}">×</button>
+          <div class="bot-subscribe-copy">
+            <strong>{escape(popup_title)}</strong>
+            <span>{escape(popup_text)}</span>
+          </div>
+          <a class="bot-subscribe-action telegram-button" href="https://t.me/{escape(BOT_USERNAME)}"><img src="/assets/telegram-plane.svg" alt="" width="20" height="20">{escape(popup_button)}</a>
+        </aside>
+        <script>
+        (function() {{
+          var popup = document.getElementById('bot-subscribe');
+          if (!popup) return;
+          var storageKey = 'bot_subscribe_dismissed_at';
+          var dismissedAt = 0;
+          try {{ dismissedAt = Number(localStorage.getItem(storageKey) || 0); }} catch (e) {{}}
+          if (dismissedAt && Date.now() - dismissedAt < 7 * 24 * 60 * 60 * 1000) return;
+          var timer = window.setTimeout(function() {{
+            popup.hidden = false;
+            window.requestAnimationFrame(function() {{ popup.classList.add('visible'); }});
+          }}, 30000);
+          var closeButton = popup.querySelector('.bot-subscribe-close');
+          closeButton.addEventListener('click', function() {{
+            window.clearTimeout(timer);
+            popup.classList.remove('visible');
+            try {{ localStorage.setItem(storageKey, String(Date.now())); }} catch (e) {{}}
+            window.setTimeout(function() {{ popup.hidden = true; }}, 220);
+          }});
+        }})();
+        </script>
+        """
     content = f"""
     {f'<div class="seo-topbar"><nav class="breadcrumbs"><span>Below Market UAE</span></nav>{language_switch}</div>' if language_switch else ''}
     <section class="app-hero">
@@ -3509,6 +3550,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <a class="app-button secondary" href="{escape(root_path)}">{escape(reset_label)}</a>
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else f'<div class="empty-state">{escape(empty_text)}</div>'}
+    {subscription_popup}
     <script>
     (function() {{
       var form = document.getElementById('catalog-filters');
@@ -3606,7 +3648,6 @@ def bot_teaser_page():
                 <strong>{escape(project_display_name(project, "ru"))}</strong>
                 <span>{escape(project['district'])}</span>
               </div>
-              <div class="teaser-lock"><span>Недвижимость доступна в боте</span></div>
             </article>
             """
         )
@@ -3616,7 +3657,6 @@ def bot_teaser_page():
             <article class="teaser-card teaser-empty" aria-hidden="true">
               <div class="teaser-placeholder"></div>
               <div class="teaser-card-copy"><strong>Новый объект</strong><span>Dubai</span></div>
-              <div class="teaser-lock"><span>Недвижимость доступна в боте</span></div>
             </article>
             """
         )
@@ -3658,11 +3698,10 @@ def bot_teaser_page():
     .teaser-card-copy strong, .teaser-card-copy span { display: block; }
     .teaser-card-copy strong { font-size: 15px; }
     .teaser-card-copy span { margin-top: 6px; opacity: .78; }
-    .teaser-lock { position: absolute; inset: 0; display: grid; place-items: center; padding: 10px; background: linear-gradient(180deg, rgba(13,30,23,.02), rgba(13,30,23,.2)); }
-    .teaser-lock span { max-width: 170px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.72); border-radius: 6px; color: white; background: rgba(12,29,22,.66); backdrop-filter: blur(4px); font-size: 11px; font-weight: 750; text-align: center; }
     @keyframes teaser-scroll { from { transform: translateX(0); } to { transform: translateX(calc(-50% - 5px)); } }
-    .bot-button { display: inline-flex; min-height: 56px; align-items: center; justify-content: center; padding: 15px 26px; border-radius: 6px; background: #23634f; color: white; font-size: 17px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 25px rgba(35,99,79,.2); }
-    .bot-button:hover { background: #194d3d; }
+    .bot-button { display: inline-flex; min-height: 56px; align-items: center; justify-content: center; gap: 10px; padding: 15px 26px; border-radius: 6px; background: #229ed9; color: white; font-size: 17px; font-weight: 800; text-decoration: none; box-shadow: 0 10px 25px rgba(34,158,217,.24); }
+    .bot-button:hover { background: #168bc2; }
+    .bot-button img { flex:0 0 auto; width:22px; height:22px; }
     .teaser-note { margin: 14px 0 0; color: #74817c; font-size: 14px; }
     @media (max-width: 720px) {
       .teaser-shell { align-items: start; padding: 28px 16px 32px; }
@@ -3672,7 +3711,6 @@ def bot_teaser_page():
       .teaser-track { gap: 8px; animation-duration: 28s; }
       .teaser-card { flex-basis: 150px; width: 150px; height: 92px; }
       .teaser-card img, .teaser-placeholder { min-height: 92px; }
-      .teaser-lock span { max-width: 126px; padding: 7px; font-size: 10px; }
       .bot-button { width: 100%; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -3743,10 +3781,10 @@ def bot_teaser_page():
   <div class="teaser-shell">
     <main class="teaser-main">
       <p class="teaser-brand">Below Market Dubai</p>
-      <h1>Недвижимость ниже рынка уже в Telegram</h1>
+      <h1>Недвижимость ниже рынка — каталог в Telegram</h1>
       <p class="teaser-intro">Актуальные цены, фотографии и детали объектов доступны только в нашем боте.</p>
       <section class="teaser-grid" aria-label="Тизеры недвижимости">{marquee_rows}</section>
-      <a class="bot-button" id="open-bot" href="{escape(bot_url)}">Открыть недвижимость в Telegram</a>
+      <a class="bot-button" id="open-bot" href="{escape(bot_url)}"><img src="/assets/telegram-plane.svg" alt="" width="22" height="22">Открыть каталог в Telegram</a>
       <p class="teaser-note">Вся актуальная недвижимость и обновления — в боте @belowmarketdubaibot</p>
     </main>
   </div>
@@ -5943,6 +5981,17 @@ a { color:inherit; }
 .app-shell { max-width:1180px; margin:0 auto; padding:18px 18px 48px; }
 .public-footer { max-width:1180px; margin:0 auto; padding:22px 18px 34px; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:18px; color:var(--muted); }
 .public-footer strong { color:var(--text); }
+.bot-subscribe[hidden] { display:none; }
+.bot-subscribe { position:fixed; z-index:50; left:50%; bottom:max(18px,env(safe-area-inset-bottom)); width:min(780px,calc(100vw - 28px)); display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px 20px; align-items:center; padding:18px 56px 18px 20px; border:1px solid #cbd8d1; border-radius:8px; background:rgba(255,255,255,.97); box-shadow:0 18px 48px rgba(19,44,34,.2); opacity:0; transform:translate(-50%,calc(100% + 42px)); transition:opacity .22s ease,transform .22s ease; pointer-events:none; }
+.bot-subscribe.visible { opacity:1; transform:translate(-50%,0); pointer-events:auto; }
+.bot-subscribe-copy { display:grid; gap:4px; text-align:left; }
+.bot-subscribe-copy strong { font-size:17px; line-height:1.25; }
+.bot-subscribe-copy span { color:var(--muted); font-size:14px; }
+.bot-subscribe-action { display:inline-flex; min-height:44px; align-items:center; justify-content:center; gap:9px; padding:10px 15px; border-radius:7px; background:#229ed9; color:#fff; font-weight:800; text-decoration:none; white-space:nowrap; box-shadow:0 8px 20px rgba(34,158,217,.2); }
+.bot-subscribe-action:hover { background:#168bc2; }
+.bot-subscribe-action img { flex:0 0 auto; width:20px; height:20px; }
+.bot-subscribe-close { position:absolute; top:8px; right:8px; width:34px; height:34px; padding:0; display:grid; place-items:center; border:0; border-radius:50%; background:transparent; color:var(--muted); font-size:24px; font-weight:400; line-height:1; }
+.bot-subscribe-close:hover { background:#eef2ef; color:var(--text); }
 .public-footer nav { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px 18px; }
 .public-footer a { color:var(--accent); text-decoration:none; font-weight:750; }
 .app-hero { display:grid; gap:8px; padding:18px 0 16px; }
@@ -6061,6 +6110,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 @media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl, .blog-grid, .article-layout, .article-lead { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } .article-author { position:static; } }
 @media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
 @media (max-width:520px) { .public-footer { flex-direction:column; } .public-footer nav { justify-content:flex-start; flex-direction:column; } }
+@media (max-width:680px) { .bot-subscribe { grid-template-columns:1fr; gap:12px; padding:16px 48px 16px 16px; } .bot-subscribe-action { width:100%; white-space:normal; } }
 """
 
 
