@@ -3547,7 +3547,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
             <strong>{escape(popup_title)}</strong>
             <span>{escape(popup_text)}</span>
           </div>
-          <a class="bot-subscribe-action telegram-button" href="https://t.me/{escape(BOT_USERNAME)}"><img src="/assets/telegram-plane.svg" alt="" width="20" height="20">{escape(popup_button)}</a>
+          <a class="bot-subscribe-action telegram-button" href="https://t.me/{escape(BOT_USERNAME)}?start=ref_source_2b56"><img src="/assets/telegram-plane.svg" alt="" width="20" height="20">{escape(popup_button)}</a>
         </aside>
         <script>
         (function() {{
@@ -3714,7 +3714,7 @@ def bot_teaser_page():
       </div>
     """
 
-    bot_url = f"https://t.me/{BOT_USERNAME}?start=web_teaser"
+    bot_url = f"https://t.me/{BOT_USERNAME}?start=ref_gpt_47be"
     styles = r"""
     :root { color-scheme: light; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
