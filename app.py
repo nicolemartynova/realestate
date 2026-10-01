@@ -3553,7 +3553,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         (function() {{
           var popup = document.getElementById('bot-subscribe');
           if (!popup) return;
-          var storageKey = 'bot_subscribe_dismissed_at';
+          var storageKey = 'bot_subscribe_dismissed_at_v2';
           var dismissedAt = 0;
           try {{ dismissedAt = Number(localStorage.getItem(storageKey) || 0); }} catch (e) {{}}
           if (dismissedAt && Date.now() - dismissedAt < 7 * 24 * 60 * 60 * 1000) return;
