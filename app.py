@@ -128,8 +128,10 @@ EVENT_LABELS = {
     "catalog_followup_yes": "Каталог follow-up: Да",
     "catalog_followup_no": "Каталог follow-up: Нет",
     "landing_bot_click": "Тизер: клик в Telegram-бот",
+    "landing_bot_open": "Тизер: открытие страницы",
     "start_web_teaser": "Запустил бота после тизера",
     "start_shared_lot": "Открыл лот по deep link",
+    "start_referral": "Запустил бота по реферальной ссылке",
 }
 
 
@@ -359,6 +361,29 @@ def init_db():
               payload text,
               created_at text not null
             );
+
+            create table if not exists referral_links (
+              id integer primary key autoincrement,
+              name text not null,
+              source text,
+              code text not null unique,
+              is_active integer not null default 1,
+              created_at text not null
+            );
+
+            create table if not exists referral_visits (
+              id integer primary key autoincrement,
+              referral_link_id integer,
+              referral_code text not null,
+              chat_id integer not null,
+              username text,
+              name text,
+              created_at text not null,
+              foreign key(referral_link_id) references referral_links(id)
+            );
+
+            create index if not exists idx_referral_visits_code on referral_visits(referral_code);
+            create index if not exists idx_referral_visits_chat on referral_visits(chat_id);
 
             create table if not exists chat_messages (
               id integer primary key autoincrement,
@@ -1789,6 +1814,20 @@ def create_personal_lead_async(chat_id, user, method=None, value=None):
 
 def handle_start(chat_id, user, payload=""):
     upsert_subscriber(user, chat_id)
+    if payload.startswith("ref_"):
+        code = normalize_referral_code(payload.removeprefix("ref_"))
+        link = record_referral_visit(code, chat_id, user)
+        log_event(
+            chat_id,
+            user,
+            "start_referral",
+            payload=json.dumps(
+                {"code": code, "name": link["name"] if link else "", "source": link["source"] if link else ""},
+                ensure_ascii=False,
+            ),
+        )
+        send_welcome_message(chat_id)
+        return
     if payload == "web_teaser":
         log_event(chat_id, user, "start_web_teaser", payload=payload)
         send_welcome_message(chat_id)
@@ -3433,7 +3472,7 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
             f"""
             select * from projects
             where {' and '.join(where)}
-            order by created_at desc, id desc
+            order by random()
             """,
             params,
         ).fetchall()
@@ -3627,7 +3666,7 @@ def bot_teaser_page():
             """
             select * from projects
             where status='active'
-            order by updated_at desc, id desc
+            order by random()
             limit 21
             """
         ).fetchall()
@@ -3720,6 +3759,28 @@ def bot_teaser_page():
     event_script = f"""
     <script>
     (function() {{
+      var pageTraffic = window.__trafficAttribution || {{}};
+      var pageSessionId = '';
+      try {{
+        pageSessionId = sessionStorage.getItem('teaser_session_id') || ('teaser-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+        sessionStorage.setItem('teaser_session_id', pageSessionId);
+      }} catch (e) {{ pageSessionId = 'teaser-' + Date.now(); }}
+      try {{
+        fetch('/app/event', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{
+            event_type: 'landing_bot_open',
+            project_id: null,
+            tg_user: null,
+            path: window.location.pathname + window.location.search,
+            session_id: pageSessionId,
+            traffic: pageTraffic,
+            referrer: document.referrer || ''
+          }}),
+          keepalive: true
+        }});
+      }} catch (e) {{}}
       var button = document.getElementById('open-bot');
       if (!button) return;
       button.addEventListener('click', function() {{
@@ -5703,7 +5764,7 @@ def upsert_catalog_session(session_id, event_type, chat_id=None, username=None, 
 
 
 def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None):
-    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close", "catalog_share", "landing_bot_click"}:
+    if event_type not in {"catalog_open", "catalog_lot_view", "catalog_lead", "catalog_heartbeat", "catalog_close", "catalog_share", "landing_bot_click", "landing_bot_open"}:
         return None
     project = get_project(project_id) if project_id else None
     chat_id = None
@@ -5757,6 +5818,16 @@ def record_catalog_event(event_type, project_id=None, tg_user=None, payload=None
                 ]
             )
         )
+    elif event_type == "landing_bot_open":
+        details = [
+            "Посетитель открыл страницу /bot",
+            f"Источник: {html.escape(traffic_source_label(traffic))}",
+        ]
+        if traffic.get("medium"):
+            details.append(f"Канал: {html.escape(traffic['medium'])}")
+        if traffic.get("campaign"):
+            details.append(f"Кампания: {html.escape(traffic['campaign'])}")
+        threading.Thread(target=notify_admin, args=("\n".join(details),), daemon=True).start()
     return event_id
 
 
@@ -5825,6 +5896,156 @@ def create_web_lead(project_id, name, contact, message, tg_user=None, session_id
     return lead_id
 
 
+def normalize_referral_code(value):
+    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", value.lower()).strip("_-")[:48]
+
+
+def create_referral_link(name, source="", code=""):
+    name = str(name or "").strip()
+    source = str(source or "").strip()
+    if not name:
+        raise ValueError("Укажите название ссылки")
+    code = normalize_referral_code(code)
+    if not code:
+        base = normalize_referral_code(source or name)[:36] or "source"
+        code = f"{base}_{secrets.token_hex(2)}"
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                "insert into referral_links(name, source, code, created_at) values (?, ?, ?, ?)",
+                (name, source or None, code, iso_now()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Такой код уже используется") from exc
+        return cur.lastrowid
+
+
+def referral_link_url(code):
+    return f"https://t.me/{BOT_USERNAME}?start=ref_{code}"
+
+
+def record_referral_visit(code, chat_id, user):
+    code = normalize_referral_code(code)
+    if not code:
+        return None
+    with db() as conn:
+        link = conn.execute(
+            "select * from referral_links where lower(code) = lower(?)",
+            (code,),
+        ).fetchone()
+        conn.execute(
+            """
+            insert into referral_visits(referral_link_id, referral_code, chat_id, username, name, created_at)
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                link["id"] if link else None,
+                code,
+                chat_id,
+                user.get("username") if user else None,
+                lead_name(user) if user else str(chat_id),
+                iso_now(),
+            ),
+        )
+    source = (link["source"] or link["name"]) if link else code
+    lines = [
+        "Переход по реферальной ссылке",
+        f"Источник: {html.escape(str(source))}",
+        f"Клиент: {html.escape(lead_name(user) if user else str(chat_id))}",
+        f"Telegram: @{html.escape(user.get('username'))}" if user and user.get("username") else f"Telegram ID: {chat_id}",
+    ]
+    threading.Thread(target=notify_admin, args=("\n".join(lines),), daemon=True).start()
+    return link
+
+
+def referrals_page(message=""):
+    with db() as conn:
+        links = conn.execute(
+            """
+            select rl.*,
+                   count(rv.id) as starts,
+                   count(distinct rv.chat_id) as users,
+                   count(distinct case when
+                     exists(select 1 from leads l where l.chat_id = rv.chat_id and l.created_at >= rv.created_at)
+                     or exists(select 1 from personal_leads pl where pl.chat_id = rv.chat_id and pl.created_at >= rv.created_at)
+                     or exists(select 1 from custom_broadcast_leads cl where cl.chat_id = rv.chat_id and cl.created_at >= rv.created_at)
+                     then rv.chat_id end) as lead_users,
+                   max(rv.created_at) as last_start
+            from referral_links rl
+            left join referral_visits rv on rv.referral_link_id = rl.id
+            group by rl.id
+            order by rl.created_at desc, rl.id desc
+            """
+        ).fetchall()
+        visits = conn.execute(
+            """
+            select rv.*, rl.name link_name, rl.source,
+                   s.first_name, s.last_name, s.username subscriber_username
+            from referral_visits rv
+            left join referral_links rl on rl.id = rv.referral_link_id
+            left join subscribers s on s.chat_id = rv.chat_id
+            order by rv.created_at desc, rv.id desc
+            limit 300
+            """
+        ).fetchall()
+
+    link_rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{escape(row['name'])}</strong><br><span class="muted">{escape(row['source'] or 'Источник не указан')}</span></td>
+          <td><div class="copy-field"><input id="ref-link-{row['id']}" value="{escape(referral_link_url(row['code']))}" readonly><button type="button" class="secondary" data-copy="ref-link-{row['id']}">Копировать</button></div><span class="muted">{escape(row['code'])}</span></td>
+          <td>{row['starts']}</td><td>{row['users']}</td><td>{row['lead_users']}</td>
+          <td>{escape(row['last_start'] or '—')}</td>
+          <td><form method="post" action="/referral/toggle"><input type="hidden" name="id" value="{row['id']}"><input type="hidden" name="is_active" value="{0 if row['is_active'] else 1}"><button class="{'secondary' if row['is_active'] else ''}">{'Активна' if row['is_active'] else 'Архивная'}</button></form></td>
+        </tr>
+        """
+        for row in links
+    )
+    visit_rows = "".join(
+        f"""
+        <tr>
+          <td>{escape(row['created_at'])}</td>
+          <td><strong>{escape(row['link_name'] or row['referral_code'])}</strong><br><span class="muted">{escape(row['source'] or row['referral_code'])}</span></td>
+          <td><strong>{escape(row['name'] or 'Telegram-пользователь')}</strong><br><span class="muted">{'@' + escape(row['username'] or row['subscriber_username']) if (row['username'] or row['subscriber_username']) else 'Telegram ID: ' + escape(row['chat_id'])}</span></td>
+        </tr>
+        """
+        for row in visits
+    )
+    content = f"""
+    <section class="panel">
+      <h2>Новая реферальная ссылка</h2>
+      <p class="muted">Ссылка откроет этот же Telegram-бот и передаст ему код источника. Новый бот не нужен.</p>
+      <form method="post" action="/referral/create">
+        <div class="form-grid">
+          <label>Название<input name="name" required placeholder="Instagram: реклама в октябре"></label>
+          <label>Источник<input name="source" placeholder="Instagram"></label>
+          <label>Код, если нужен свой<input name="code" maxlength="48" placeholder="instagram_october"></label>
+        </div>
+        <p class="actions"><button>Создать ссылку</button></p>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Ссылки и конверсии</h2>
+      <div class="table-scroll"><table><thead><tr><th>Кампания</th><th>Ссылка</th><th>Запуски</th><th>Люди</th><th>С заявкой</th><th>Последний запуск</th><th>Статус</th></tr></thead><tbody>{link_rows or '<tr><td colspan="7" class="muted">Ссылок пока нет.</td></tr>'}</tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Пользователи по ссылкам</h2>
+      <div class="table-scroll"><table><thead><tr><th>Дата</th><th>Ссылка</th><th>Пользователь</th></tr></thead><tbody>{visit_rows or '<tr><td colspan="3" class="muted">Переходов пока нет.</td></tr>'}</tbody></table></div>
+    </section>
+    <script>
+    document.querySelectorAll('[data-copy]').forEach(function(button) {{
+      button.addEventListener('click', function() {{
+        var input = document.getElementById(button.dataset.copy);
+        if (!input) return;
+        navigator.clipboard.writeText(input.value).then(function() {{ button.textContent = 'Скопировано'; }});
+      }});
+    }});
+    </script>
+    """
+    return layout("Реферальные ссылки", content, "referrals", message)
+
+
 def layout(title, content, active="projects", message=""):
     nav = [
         ("projects", "/admin", "Объекты"),
@@ -5833,6 +6054,7 @@ def layout(title, content, active="projects", message=""):
         ("leads", "/leads", "Заявки"),
         ("chats", "/chats", "Чаты"),
         ("stats", "/stats", "Статистика"),
+        ("referrals", "/referrals", "Реферальные ссылки"),
         ("subscriber_stats", "/subscribers/stats", "Стата подписчиков"),
         ("broadcasts", "/broadcasts", "Рассылки"),
         ("subscribers", "/subscribers", "Подписчики"),
@@ -5899,6 +6121,7 @@ tr:last-child td { border-bottom:0; }
 .status { display:inline-flex; align-items:center; padding:3px 8px; border-radius:999px; background:#e8f1ed; color:var(--accent); font-size:12px; font-weight:700; }
 .status.archived { background:#eee; color:#777; }
 .actions { display:flex; gap:8px; flex-wrap:wrap; }
+.copy-field { min-width:420px; display:grid; grid-template-columns:minmax(260px,1fr) auto; gap:8px; margin-bottom:5px; }
 button, .button { border:0; background:var(--accent); color:#fff; padding:9px 12px; border-radius:7px; font-weight:700; cursor:pointer; text-decoration:none; display:inline-block; }
 button.icon-button, .button.icon-button { width:40px; height:40px; padding:0; display:inline-flex; align-items:center; justify-content:center; font-size:22px; line-height:1; }
 button.secondary, .button.secondary { background:#eef2ef; color:var(--text); border:1px solid var(--line); }
@@ -5970,7 +6193,7 @@ textarea { min-height:110px; resize:vertical; }
 .login form { width:min(420px,calc(100vw - 32px)); background:#fff; border:1px solid var(--line); border-radius:8px; padding:26px; display:grid; gap:14px; }
 .login h1 { font-size:24px; }
 .muted { color:var(--muted); }
-@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout,.crm-two-col,.crm-header { grid-template-columns:1fr; } main { padding:22px 16px 44px; } .chat-layout { height:auto; min-height:0; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { height:calc(100vh - 190px); min-height:520px; } .chat-sidebar { max-height:360px; } }
+@media (max-width:900px) { body { grid-template-columns:1fr; } aside { position:static; } .grid,.form-grid,.chat-layout,.crm-two-col,.crm-header,.copy-field { grid-template-columns:1fr; } .copy-field { min-width:280px; } main { padding:22px 16px 44px; } .chat-layout { height:auto; min-height:0; } .chat-layout.active-chat .chat-shell { order:-1; } .chat-shell { height:calc(100vh - 190px); min-height:520px; } .chat-sidebar { max-height:360px; } }
 """
 
 APP_CSS = """
@@ -8428,6 +8651,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(leads_page())
         elif path == "/stats":
             self.send_html(statistics_page(query))
+        elif path == "/referrals":
+            self.send_html(referrals_page())
         elif path == "/subscribers/stats":
             self.send_html(subscriber_statistics_page(query))
         elif path == "/broadcasts":
@@ -8699,6 +8924,26 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("update subscribers set subscriber_tag = ? where chat_id = ?", (tag or None, chat_id))
             self.redirect("/subscribers")
+        elif path == "/referral/create":
+            form = parse_form(self)
+            try:
+                create_referral_link(
+                    form_value(form, "name"),
+                    form_value(form, "source"),
+                    form_value(form, "code"),
+                )
+            except ValueError as exc:
+                self.send_html(referrals_page(str(exc)), status=400)
+                return
+            self.send_html(referrals_page("Реферальная ссылка создана"))
+        elif path == "/referral/toggle":
+            form = parse_form(self)
+            with db() as conn:
+                conn.execute(
+                    "update referral_links set is_active = ? where id = ?",
+                    (1 if form_value(form, "is_active") == "1" else 0, form_value(form, "id")),
+                )
+            self.redirect("/referrals")
         elif path == "/crm/note":
             form = parse_form(self)
             chat_id = form_value(form, "chat_id")
