@@ -5922,59 +5922,7 @@ def create_referral_link(name, source="", code=""):
 
 
 def referral_link_url(code):
-    base_url = PUBLIC_BASE_URL or "https://belowmarketuae.com"
-    return f"{base_url}/r/{urllib.parse.quote(code)}"
-
-
-def referral_redirect_page(code):
-    code = normalize_referral_code(code)
-    if not code:
-        return None
-    base_url = PUBLIC_BASE_URL or "https://belowmarketuae.com"
-    page_url = f"{base_url}/r/{urllib.parse.quote(code)}"
-    bot_url = f"https://t.me/{BOT_USERNAME}?start=ref_{code}"
-    image_url = f"{base_url}/assets/watermark-logo.png"
-    title = "Below Market Dubai"
-    description = "Недвижимость в Дубае ниже рынка: distress deals, срочные продажи и закрытые предложения."
-    return f"""<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex,nofollow">
-  <title>{escape(title)}</title>
-  <meta name="description" content="{escape(description)}">
-  <link rel="canonical" href="{escape(page_url)}">
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Below Market UAE">
-  <meta property="og:title" content="{escape(title)}">
-  <meta property="og:description" content="{escape(description)}">
-  <meta property="og:url" content="{escape(page_url)}">
-  <meta property="og:image" content="{escape(image_url)}">
-  <meta property="og:image:width" content="1080">
-  <meta property="og:image:height" content="1080">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{escape(title)}">
-  <meta name="twitter:description" content="{escape(description)}">
-  <meta name="twitter:image" content="{escape(image_url)}">
-  <style>
-    body {{ min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; box-sizing:border-box; background:#f4f5f2; color:#17221d; font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; text-align:center; }}
-    main {{ width:min(420px,100%); display:grid; gap:16px; justify-items:center; }}
-    img {{ width:132px; height:132px; object-fit:cover; border-radius:8px; }}
-    h1,p {{ margin:0; }}
-    a {{ display:inline-flex; min-height:48px; align-items:center; justify-content:center; padding:0 20px; border-radius:7px; background:#229ed9; color:#fff; font-weight:800; text-decoration:none; }}
-  </style>
-  <script>window.location.replace({json.dumps(bot_url)});</script>
-</head>
-<body>
-  <main>
-    <img src="{escape(image_url)}" alt="Below Market Dubai">
-    <h1>{escape(title)}</h1>
-    <p>{escape(description)}</p>
-    <a href="{escape(bot_url)}">Открыть Telegram-бот</a>
-  </main>
-</body>
-</html>"""
+    return f"https://t.me/{BOT_USERNAME}?start=ref_{code}"
 
 
 def record_referral_visit(code, chat_id, user):
@@ -8647,9 +8595,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect("/ru/nedvizhimost-v-dubae-nizhe-rynka")
             else:
                 self.redirect("/en/below-market-property-dubai")
-        elif path.startswith("/r/"):
-            referral_page = referral_redirect_page(urllib.parse.unquote(path.removeprefix("/r/")))
-            self.send_html(referral_page if referral_page else "Not found", status=200 if referral_page else 404)
         elif path in ("/bot", "/bot/"):
             self.send_html(bot_teaser_page())
         elif path == "/app":
