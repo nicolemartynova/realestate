@@ -5948,10 +5948,13 @@ def record_referral_visit(code, chat_id, user):
                 iso_now(),
             ),
         )
-    source = (link["source"] or link["name"]) if link else code
+    campaign = link["name"] if link else code
+    source = (link["source"] or "Не указан") if link else "Не указан"
     lines = [
         "Переход по реферальной ссылке",
+        f"Кампания: {html.escape(str(campaign))}",
         f"Источник: {html.escape(str(source))}",
+        f"Код: {html.escape(code)}",
         f"Клиент: {html.escape(lead_name(user) if user else str(chat_id))}",
         f"Telegram: @{html.escape(user.get('username'))}" if user and user.get("username") else f"Telegram ID: {chat_id}",
     ]
@@ -5959,8 +5962,18 @@ def record_referral_visit(code, chat_id, user):
     return link
 
 
-def referrals_page(message=""):
+def referrals_page(message="", edit_id=None):
     with db() as conn:
+        edit_link = None
+        try:
+            edit_id = int(edit_id or 0)
+        except (TypeError, ValueError):
+            edit_id = 0
+        if edit_id:
+            edit_link = conn.execute(
+                "select * from referral_links where id = ?",
+                (edit_id,),
+            ).fetchone()
         links = conn.execute(
             """
             select rl.*,
@@ -5997,7 +6010,10 @@ def referrals_page(message=""):
           <td><div class="copy-field"><input id="ref-link-{row['id']}" value="{escape(referral_link_url(row['code']))}" readonly><button type="button" class="secondary" data-copy="ref-link-{row['id']}">Копировать</button></div><span class="muted">{escape(row['code'])}</span></td>
           <td>{row['starts']}</td><td>{row['users']}</td><td>{row['lead_users']}</td>
           <td>{escape(row['last_start'] or '—')}</td>
-          <td><form method="post" action="/referral/toggle"><input type="hidden" name="id" value="{row['id']}"><input type="hidden" name="is_active" value="{0 if row['is_active'] else 1}"><button class="{'secondary' if row['is_active'] else ''}">{'Активна' if row['is_active'] else 'Архивная'}</button></form></td>
+          <td><div class="actions">
+            <a class="button secondary" href="/referrals?edit={row['id']}">Редактировать</a>
+            <form method="post" action="/referral/toggle"><input type="hidden" name="id" value="{row['id']}"><input type="hidden" name="is_active" value="{0 if row['is_active'] else 1}"><button class="secondary">{'В архив' if row['is_active'] else 'Активировать'}</button></form>
+          </div></td>
         </tr>
         """
         for row in links
@@ -6012,22 +6028,40 @@ def referrals_page(message=""):
         """
         for row in visits
     )
+    if edit_link:
+        form_title = "Редактирование реферальной ссылки"
+        form_action = "/referral/update"
+        form_hidden = f'<input type="hidden" name="id" value="{edit_link["id"]}">'
+        form_name = escape(edit_link["name"])
+        form_source = escape(edit_link["source"] or "")
+        code_field = f'<label>Код ссылки<input value="{escape(edit_link["code"])}" readonly><span class="muted">Код не меняется, чтобы не сломать опубликованные ссылки.</span></label>'
+        form_buttons = '<button>Сохранить</button><a class="button secondary" href="/referrals">Отмена</a>'
+    else:
+        form_title = "Новая реферальная ссылка"
+        form_action = "/referral/create"
+        form_hidden = ""
+        form_name = ""
+        form_source = ""
+        code_field = '<label>Код, если нужен свой<input name="code" maxlength="48" placeholder="instagram_october"></label>'
+        form_buttons = '<button>Создать ссылку</button>'
+
     content = f"""
     <section class="panel">
-      <h2>Новая реферальная ссылка</h2>
+      <h2>{form_title}</h2>
       <p class="muted">Ссылка откроет этот же Telegram-бот и передаст ему код источника. Новый бот не нужен.</p>
-      <form method="post" action="/referral/create">
+      <form method="post" action="{form_action}">
+        {form_hidden}
         <div class="form-grid">
-          <label>Название<input name="name" required placeholder="Instagram: реклама в октябре"></label>
-          <label>Источник<input name="source" placeholder="Instagram"></label>
-          <label>Код, если нужен свой<input name="code" maxlength="48" placeholder="instagram_october"></label>
+          <label>Название кампании<input name="name" required value="{form_name}" placeholder="Instagram: реклама в октябре"></label>
+          <label>Источник<input name="source" value="{form_source}" placeholder="Instagram"></label>
+          {code_field}
         </div>
-        <p class="actions"><button>Создать ссылку</button></p>
+        <p class="actions">{form_buttons}</p>
       </form>
     </section>
     <section class="panel">
       <h2>Ссылки и конверсии</h2>
-      <div class="table-scroll"><table><thead><tr><th>Кампания</th><th>Ссылка</th><th>Запуски</th><th>Люди</th><th>С заявкой</th><th>Последний запуск</th><th>Статус</th></tr></thead><tbody>{link_rows or '<tr><td colspan="7" class="muted">Ссылок пока нет.</td></tr>'}</tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>Кампания</th><th>Ссылка</th><th>Запуски</th><th>Люди</th><th>С заявкой</th><th>Последний запуск</th><th>Действия</th></tr></thead><tbody>{link_rows or '<tr><td colspan="7" class="muted">Ссылок пока нет.</td></tr>'}</tbody></table></div>
     </section>
     <section class="panel">
       <h2>Пользователи по ссылкам</h2>
@@ -8652,7 +8686,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/stats":
             self.send_html(statistics_page(query))
         elif path == "/referrals":
-            self.send_html(referrals_page())
+            self.send_html(referrals_page(edit_id=query.get("edit", [""])[0]))
         elif path == "/subscribers/stats":
             self.send_html(subscriber_statistics_page(query))
         elif path == "/broadcasts":
@@ -8936,6 +8970,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(referrals_page(str(exc)), status=400)
                 return
             self.send_html(referrals_page("Реферальная ссылка создана"))
+        elif path == "/referral/update":
+            form = parse_form(self)
+            referral_id = form_value(form, "id")
+            name = form_value(form, "name").strip()
+            source = form_value(form, "source").strip()
+            if not name:
+                self.send_html(referrals_page("Укажите название кампании", edit_id=referral_id), status=400)
+                return
+            with db() as conn:
+                conn.execute(
+                    "update referral_links set name = ?, source = ? where id = ?",
+                    (name, source or None, referral_id),
+                )
+            self.send_html(referrals_page("Название кампании и источник обновлены"))
         elif path == "/referral/toggle":
             form = parse_form(self)
             with db() as conn:
