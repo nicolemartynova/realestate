@@ -3,6 +3,7 @@ import cgi
 import hashlib
 import hmac
 import html
+import http.client
 import io
 import json
 import mimetypes
@@ -12,6 +13,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import threading
@@ -444,6 +446,17 @@ def init_db():
               foreign key(status_id) references crm_statuses(id)
             );
 
+            create table if not exists admin_notifications (
+              id integer primary key autoincrement,
+              chat_id text not null,
+              text text not null,
+              attempts integer not null default 0,
+              next_attempt real not null default 0,
+              status text not null default 'pending'
+            );
+            create index if not exists admin_notifications_pending
+              on admin_notifications(status, next_attempt, id);
+
             create table if not exists report_runs (
               report_key text primary key,
               sent_at text not null
@@ -752,6 +765,35 @@ def verify_signature(signed):
     return None
 
 
+def telegram_connection(address, timeout=30, source_address=None):
+    # The VPS has a broken IPv6 route to Telegram. Keep TLS hostname verification
+    # while resolving only IPv4 for Telegram; other HTTP clients are unaffected.
+    host, port = address
+    last_error = None
+    for info in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM):
+        try:
+            return socket.create_connection(info[4], timeout, source_address)
+        except OSError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise OSError("No IPv4 address for Telegram")
+
+
+class TelegramHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = telegram_connection
+
+
+class TelegramHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(TelegramHTTPSConnection, req, context=self._context)
+
+
+TELEGRAM_HTTP = urllib.request.build_opener(TelegramHTTPSHandler())
+
+
 def telegram_api(method, payload):
     if not BOT_TOKEN:
         return None
@@ -762,7 +804,7 @@ def telegram_api(method, payload):
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as res:
+        with TELEGRAM_HTTP.open(req, timeout=30) as res:
             result = json.loads(res.read().decode())
             if method != "getUpdates":
                 log_perf("telegram_api", started_at, method=method, ok=result.get("ok"))
@@ -820,7 +862,7 @@ def telegram_api_multipart_files(method, fields, files):
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as res:
+        with TELEGRAM_HTTP.open(req, timeout=60) as res:
             result = json.loads(res.read().decode())
             log_perf("telegram_api_multipart", started_at, method=method, ok=result.get("ok"), files=len(files), bytes=len(body))
             return result
@@ -894,7 +936,7 @@ def language_prompt(chat_id):
 
 BOT_EN = {
     "💬 Хочу узнать подробнее": "💬 Request details", "👀 Смотреть еще": "👀 Show more", "🏙 Открыть каталог": "🏙 Open catalog",
-    "🎯 Искать по фильтрам": "🎯 Search with filters", "🔎 Изменить фильтры": "🔎 Change filters", "👀 Показать просмотренные": "👀 Show viewed properties",
+    "🎯 Подобрать по фильтрам": "🎯 Filter properties", "🔎 Изменить фильтры": "🔎 Change filters", "👀 Показать просмотренные": "👀 Show viewed properties",
     "♻️ Сбросить фильтры": "♻️ Reset filters", "👀 Смотреть без фильтров": "👀 Browse all", "🔎 Применить другие фильтры": "🔎 Apply other filters",
     "✈️ Написать в Telegram": "✈️ Contact via Telegram", "📞 Оставить телефон": "📞 Leave phone number", "🟢 Оставить WhatsApp": "🟢 Leave WhatsApp number",
     "📞 Отправить телефон": "📞 Share phone number", "Отправить телефон": "Share phone number", "📝 Оставить заявку на подбор": "📝 Request a property selection",
@@ -1388,16 +1430,6 @@ def bot_filter_sql(sub):
 def project_order_clause(random_order=False, sub=None):
     if random_order:
         return "random()"
-    sort = sub["filter_sort"] if sub else "relevance"
-    unit = {label.lower(): key for key, label in UNIT_TYPES}.get((sub["filter_rooms"] or "").lower()) if sub else None
-    price = f"case when p.listing_type='developer' then p.{unit}_price_aed else p.price end" if unit else "p.price"
-    if sort in ("price_asc", "price_desc"):
-        return f"({price} <= 0 or {price} is null), {price} " + ("asc" if sort == "price_asc" else "desc") + ", p.id desc"
-    if sort == "discount_desc":
-        discount = discount_sql("p.")
-        return f"({discount} is null), {discount} desc, p.updated_at desc, p.id desc"
-    if sort == "popular":
-        return "((select count(*) from catalog_events ce where ce.project_id=p.id and ce.event_type='catalog_lot_view') + (select count(*) from bot_events be where be.project_id=p.id and be.event_type='click_interest')) desc, p.id desc"
     return "p.updated_at desc, p.id desc"
 
 
@@ -1430,9 +1462,8 @@ def send_filter_options(chat_id):
     en = subscriber_preferences(chat_id)[0] == "en"
     buttons = [[{"text": ("☑ " if sub and sub["filter_developer"] else "☐ ") + ("From developer" if en else "От застройщика"), "callback_data": "filter_developer_toggle"}]]
     buttons.append([{"text": ("☑ " if sub and sub["filter_distress"] else "☐ ") + ("Distress only" if en else "Только дистресс"), "callback_data": "filter_distress_toggle"}])
-    for key, ru, english in [("relevance", "По релевантности", "Relevance"), ("popular", "По популярности", "Popularity"), ("price_asc", "Цена: по возрастанию", "Price: low to high"), ("price_desc", "Цена: по убыванию", "Price: high to low"), ("discount_desc", "По скидке к рынку", "Market discount")]:
-        buttons.append([{"text": english if en else ru, "callback_data": "filter_sort:" + key}])
-    send_message(chat_id, "Choose a source and sort order:" if en else "Выберите источник объектов и сортировку:", inline_keyboard(buttons))
+    buttons.append([{"text": "Continue" if en else "Далее", "callback_data": "filter_continue"}])
+    send_message(chat_id, "Choose property filters:" if en else "Выберите фильтры объектов:", inline_keyboard(buttons))
 
 
 def offer_filter_change(chat_id, total):
@@ -1544,31 +1575,28 @@ def welcome_keyboard(chat_id=None):
     rows = []
     if PUBLIC_BASE_URL:
         rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app?lang={subscriber_preferences(chat_id)[0] or 'ru'}&currency={subscriber_preferences(chat_id)[1]}"}}])
-    rows.append([{"text": "🎯 Искать по фильтрам", "callback_data": "filter_start"}])
+    rows.append([{"text": "🎯 Подобрать по фильтрам", "callback_data": "filter_start"}])
     rows.append([{ "text": "Русский / English", "callback_data": "choose_language"}, {"text": "AED / USD", "callback_data": "choose_currency"}])
     return inline_keyboard(rows)
 
 
+BOT_DESCRIPTIONS = {
+    "ru": "Недвижимость в Дубае дешевле рынка — зачем переплачивать?\n\n🔥 Срочные продажи, дистресс-лоты и предложения от застройщиков. Смотрите цены и находите объекты с самой большой скидкой к рынку.\n\nНажмите «Запустить» и выбирайте.",
+    "en": "Dubai property below market price — why pay more?\n\n🔥 Urgent sales, distress deals and developer offers. Compare prices and find the biggest discounts to market value.\n\nTap Start to explore.",
+}
+
+
 def send_welcome_message(chat_id):
     text = (
-        "Добро пожаловать в Below Market Dubai 🏙\n\n"
-        "Я Александр, лицензированный брокер в Дубае.\n\n"
-        "В этом боте я собираю объекты недвижимости, которые можно купить ниже рынка: "
-        "distress deals, срочные продажи и варианты, которых часто нет в открытых листингах.\n\n"
-        "Здесь можно:\n"
-        "🔥 смотреть актуальные лоты ниже рынка\n"
-        "📊 быстро понимать выгоду по цене\n"
-        "🏡 открыть каталог и изучить варианты самостоятельно\n"
-        "🎯 подобрать объекты по району и количеству комнат\n"
-        "📩 получать новые предложения 2 раза в день, без ночных уведомлений\n\n"
-        "Если хотите просто посмотреть рынок — откройте каталог.\n"
-        "Если уже есть запрос по бюджету, району или цели покупки — начните с фильтров."
+        "Я Александр Виноградов, лицензированный брокер в Дубае.\n\n"
+        "Откройте каталог или задайте фильтры для подбора. Понравился объект? "
+        "Нажмите «Хочу узнать подробнее» — расскажу детали.\n\n"
+        "Личная связь: @roi_counter"
     )
     if subscriber_preferences(chat_id)[0] == "en":
-        text = ("Welcome to Below Market Dubai 🏙\n\nI'm Alexander, a licensed real estate broker in Dubai.\n\n"
-                "Here I share below-market properties: distress deals, urgent sales and opportunities that are often absent from public listings.\n\n"
-                "Browse available properties, compare prices, open the catalog or filter by area and bedroom count. "
-                "New offers arrive twice a day, with no overnight notifications.\n\nOpen the catalog to explore, or start with the filters if you know what you are looking for.")
+        text = ("I’m Alexander Vinogradov, a licensed real estate broker in Dubai.\n\n"
+                "Browse the catalog or use filters to find a property. See something you like? "
+                "Tap ‘Request details’ and I’ll tell you more.\n\nContact me directly: @roi_counter")
     send_message(chat_id, text, keyboard=welcome_keyboard(chat_id))
 
 
@@ -1685,12 +1713,42 @@ def send_project_actions(chat_id, project_id):
 
 
 def notify_admin(text):
-    started_at = time.perf_counter()
-    count = 0
-    for chat_id in [item.strip() for item in ADMIN_CHAT_ID.split(",") if item.strip()]:
-        send_message(chat_id, text)
-        count += 1
-    log_perf("notify_admin", started_at, admins=count)
+    recipients = [item.strip() for item in ADMIN_CHAT_ID.split(",") if item.strip()]
+    with db() as conn:
+        conn.executemany("insert into admin_notifications(chat_id, text) values (?, ?)",
+                         [(chat_id, text) for chat_id in recipients])
+
+
+def deliver_admin_notification():
+    with db() as conn:
+        row = conn.execute("select * from admin_notifications where status='pending' and next_attempt<=? order by id limit 1", (time.time(),)).fetchone()
+    if not row:
+        return False
+    result = send_message(row["chat_id"], row["text"])
+    attempts = row["attempts"] + 1
+    if result and result.get("ok"):
+        with db() as conn:
+            conn.execute("delete from admin_notifications where id=?", (row["id"],))
+    else:
+        # Do not resend an ambiguous timeout: Telegram may have accepted it.
+        retry = result and result.get("error_code") == 429 and attempts < 5
+        delay = max(5, int((result or {}).get("parameters", {}).get("retry_after", 30)))
+        with db() as conn:
+            conn.execute("update admin_notifications set attempts=?, next_attempt=?, status=? where id=?",
+                         (attempts, time.time()+delay, "pending" if retry else "failed", row["id"]))
+        if not retry:
+            print(f"Admin notification {row['id']} failed; retained for review", file=sys.stderr)
+    return True
+
+
+def admin_notification_loop(stop_event):
+    while not stop_event.is_set():
+        try:
+            if deliver_admin_notification():
+                continue
+        except Exception:
+            traceback.print_exc()
+        stop_event.wait(1)
 
 
 def save_chat_message(chat_id, user, direction, text):
@@ -2188,12 +2246,9 @@ def handle_callback_inner(callback):
             conn.execute("update subscribers set filter_distress=1-filter_distress where chat_id=?", (chat_id,))
         send_filter_options(chat_id)
         return
-    if data.startswith("filter_sort:"):
-        sort = data.split(":", 1)[1]
-        if sort in ("relevance", "popular", "price_asc", "price_desc", "discount_desc"):
-            with db() as conn:
-                conn.execute("update subscribers set filter_sort=? where chat_id=?", (sort, chat_id))
-            send_filter_rooms_prompt(chat_id)
+    if data == "filter_continue" or data.startswith("filter_sort:"):
+        # Old sort buttons still advance safely, but no longer change ordering.
+        send_filter_rooms_prompt(chat_id)
         return
     if data == "filter_reset":
         log_event(chat_id, user, "click_filter_reset", payload=data)
@@ -9980,6 +10035,7 @@ def main():
     init_db()
     BOT_METRIKA.initialize()
     stop_event = threading.Event()
+    threading.Thread(target=admin_notification_loop, args=(stop_event,), daemon=True).start()
     analytics_thread = threading.Thread(target=BOT_METRIKA.run, args=(stop_event,), daemon=True)
     analytics_thread.start()
     menu_thread = threading.Thread(target=configure_bot_menu_button, daemon=True)

@@ -140,18 +140,32 @@ class CatalogFeaturesTests(unittest.TestCase):
         low = self.create(project_name='Cheap', studio_price_aed='500000')
         high = self.create(project_name='Expensive', studio_price_aed='900000')
         self.prefs(language='en', filter_developer=1, filter_rooms='Studio', filter_sort='price_asc')
-        self.assertEqual(app.next_project_for(101)['id'], low)
-        app.mark_seen(101, low)
-        self.assertEqual(app.filtered_projects_counts(101), (2, 1))
         self.assertEqual(app.next_project_for(101)['id'], high)
+        app.mark_seen(101, high)
+        self.assertEqual(app.filtered_projects_counts(101), (2, 1))
+        self.assertEqual(app.next_project_for(101)['id'], low)
         with patch.object(app, 'send_project_card', return_value={'ok':True}) as card:
             app.handle_callback_inner({'id':'q2', 'data':f'currency:USD:{low}', 'from':self.user, 'message':{'chat':{'id':101}}})
             self.assertIn('USD', card.call_args.args[3])
         self.assertEqual(app.subscriber_preferences(101), ('en','USD'))
         app.send_welcome_message(101)
-        self.assertIn('Welcome', app.telegram_api.call_args.args[1]['text'])
+        self.assertIn('Alexander Vinogradov', app.telegram_api.call_args.args[1]['text'])
         app.send_catalog_followup(101, 'Test')
         self.assertNotRegex(app.telegram_api.call_args.args[1]['text'], '[А-Яа-яЁё]')
+
+    def test_bot_filter_menu_has_no_sort_and_advances(self):
+        self.prefs(language='en')
+        app.send_filter_options(101)
+        payload = app.telegram_api.call_args.args[1]
+        self.assertNotIn('filter_sort:', payload['reply_markup'])
+        self.assertIn('filter_continue', payload['reply_markup'])
+        with patch.object(app, 'send_filter_rooms_prompt') as prompt:
+            for data in ('filter_continue', 'filter_sort:popular'):
+                app.handle_callback_inner({'id':'q4', 'data':data, 'from':self.user, 'message':{'chat':{'id':101}}})
+            self.assertEqual(prompt.call_count, 2)
+        for text in app.BOT_DESCRIPTIONS.values():
+            self.assertNotIn('nikadigital', text)
+            self.assertLessEqual(len(text), 512)
 
     def test_broadcast_language_and_pending_subscribers(self):
         self.prefs(language='en')
