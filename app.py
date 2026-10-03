@@ -6,6 +6,7 @@ import html
 import io
 import json
 import mimetypes
+import math
 import os
 import re
 import secrets
@@ -168,6 +169,9 @@ def db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+AED_PER_USD = 3.6725
+UNIT_TYPES = [("studio", "Studio"), ("one_bed", "1BR"), ("two_bed", "2BR"), ("three_bed", "3BR")]
 
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -446,6 +450,8 @@ def init_db():
             );
             """
         )
+        # Keep schema changes and legacy price conversion in one transaction.
+        conn.execute("BEGIN")
         ensure_column(conn, "projects", "tg_media_file_id", "text")
         ensure_column(conn, "projects", "tg_media_kind", "text")
         ensure_column(conn, "projects", "tg_media_signature", "text")
@@ -464,6 +470,28 @@ def init_db():
         ensure_column(conn, "projects", "developer_comment", "text")
         conn.execute("update projects set city = 'Dubai' where city is null or trim(city) = ''")
         conn.execute("update projects set listing_type = 'resale' where listing_type is null or trim(listing_type) = ''")
+        # Migrate legacy developer USD values once, preserving the source columns.
+        columns = {row["name"] for row in conn.execute("pragma table_info(projects)")}
+        migrate_prices = "studio_price_aed" not in columns
+        for unit, _ in UNIT_TYPES:
+            ensure_column(conn, "projects", unit + "_price_aed", "real")
+            ensure_column(conn, "projects", unit + "_max_price_aed", "real")
+            ensure_column(conn, "projects", unit + "_max_estimated", "integer not null default 1")
+            ensure_column(conn, "projects", unit + "_area", "text")
+            if migrate_prices:
+                conn.execute(f"update projects set {unit}_price_aed = round({unit}_price_usd * ?, 2) where listing_type='developer'", (AED_PER_USD,))
+        if migrate_prices:
+            for row in conn.execute("select * from projects where listing_type='developer'").fetchall():
+                prices = [row[unit + "_price_aed"] for unit, _ in UNIT_TYPES if row[unit + "_price_aed"] and row[unit + "_price_aed"] > 0]
+                conn.execute("update projects set price=? where id=?", (min(prices) if prices else 0, row["id"]))
+        for field in ("developer_comment_en", "description_en", "payment_plan_en", "handover_en"):
+            ensure_column(conn, "projects", field, "text")
+        ensure_column(conn, "projects", "below_market_pct", "real")
+        ensure_column(conn, "subscribers", "currency", "text not null default 'AED'")
+        ensure_column(conn, "subscribers", "pending_start", "text")
+        ensure_column(conn, "subscribers", "filter_sort", "text not null default 'relevance'")
+        ensure_column(conn, "subscribers", "filter_developer", "integer not null default 0")
+        ensure_column(conn, "subscribers", "filter_distress", "integer not null default 0")
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
@@ -474,6 +502,7 @@ def init_db():
         ensure_column(conn, "subscribers", "last_delivery_error_at", "text")
         ensure_column(conn, "subscribers", "last_delivery_error", "text")
         ensure_column(conn, "subscribers", "subscriber_tag", "text")
+        ensure_column(conn, "custom_broadcasts", "text_en", "text")
         ensure_column(conn, "custom_broadcasts", "send_at", "text")
         ensure_column(conn, "custom_broadcast_leads", "status", "text not null default 'new'")
         ensure_column(conn, "web_leads", "status", "text not null default 'new'")
@@ -594,12 +623,45 @@ def is_developer_project(project):
 
 
 def developer_price_rows(project):
-    return [
-        ("Studio", project["studio_price_usd"]),
-        ("1BR", project["one_bed_price_usd"]),
-        ("2BR", project["two_bed_price_usd"]),
-        ("3BR", project["three_bed_price_usd"]),
-    ]
+    return [(label, project[unit + "_price_aed"]) for unit, label in UNIT_TYPES]
+
+
+def format_price(value, currency="AED"):
+    if value in (None, ""):
+        return ""
+    return f"{money(float(value) / AED_PER_USD)} USD" if currency == "USD" else f"{money(value)} AED"
+
+
+def project_discount(project):
+    p = dict(project)
+    if p.get("below_market_pct") is not None:
+        return p["below_market_pct"]
+    if not p.get("price") or float(p["price"]) <= 0:
+        return None
+    return pct_below(p["price"], p.get("market_price"))
+
+
+def discount_sql(prefix=""):
+    return (f"coalesce({prefix}below_market_pct, case when {prefix}market_price>0 and {prefix}price>0 "
+            f"then 100.0*({prefix}market_price-{prefix}price)/{prefix}market_price end)")
+
+
+def project_text(project, field, lang="ru"):
+    p = dict(project)
+    if lang != "en":
+        return p.get(field) or ""
+    translated = p.get(field + "_en")
+    original = p.get(field) or ""
+    return translated or (original if not re.search(r"[А-Яа-яЁё]", original) else "")
+
+
+def max_price_suggestion(unit, exclude_id=None):
+    # Only manually confirmed ranges are evidence. Estimates never train estimates.
+    with db() as conn:
+        rows = conn.execute(f"select {unit}_max_price_aed - {unit}_price_aed as delta from projects where listing_type='developer' and {unit}_max_estimated=0 and {unit}_price_aed > 0 and {unit}_max_price_aed >= {unit}_price_aed and id != ?", (exclude_id or 0,)).fetchall()
+    if len(rows) >= 5:
+        return round(sum(row["delta"] for row in rows) / len(rows)), len(rows)
+    return 100000, 0
 
 
 def developer_min_price(project):
@@ -624,67 +686,54 @@ def pct_below(price, reference):
     return round((ref_f - price_f) / ref_f * 100)
 
 
-def project_caption(project):
-    if is_developer_project(project):
-        rows = [
-            ("🏷", "Категория", project["category"]),
-            ("🌆", "Город", project["city"]),
-            ("📍", "Район", project["district"]),
-            ("🏗", "Застройщик", project["developer_name"]),
-            ("🏙", "Проект", project["project_name"] or project["title"]),
-            ("🛋", "Меблировка", project["furnishing"]),
-        ]
-        for unit_type, price in developer_price_rows(project):
-            if price not in (None, ""):
-                rows.append(("💰", f"Мин. цена {unit_type}", f"${money(price)}"))
-        rows.extend(
-            [
-                ("🗓", "Рассрочка", project["payment_plan"]),
-                ("🔑", "Ключи", project["handover"]),
-            ]
-        )
-        lines = ["<b>🏗 ОТ ЗАСТРОЙЩИКА</b>", ""]
-        for icon, label, value in rows:
-            if value not in (None, ""):
-                lines.append(f"{icon} <b>{label}:</b> {html.escape(str(value))}")
-        if project["developer_comment"]:
-            lines.extend(["", html.escape(project["developer_comment"])])
-        return "\n".join(lines)
-
-    rows = [
-        ("🏷", "Категория", project["category"]),
-        ("🌆", "Город", project["city"]),
-        ("📍", "Район", project["district"]),
-        ("🏢", "Здание", project["building"]),
-        ("🛏", "Комнаты", project["rooms"]),
-        ("🛁", "Санузлы", project["bathrooms"]),
-        ("🪜", "Этаж", project["floor_level"]),
-        ("🚗", "Парковка", project["parking"]),
-        ("🔑", "Статус", project["availability"]),
-        ("🛋", "Меблировка", project["furnishing"]),
-        ("🌿", "Балкон", project["balcony"]),
-        ("📐", "Площадь", project["area"]),
-        ("💰", "Цена", f"{money(project['price'])} AED"),
-    ]
+def project_caption(project, lang="ru", currency="AED"):
+    en = lang == "en"
+    def label(ru, english):
+        return english if en else ru
+    developer = is_developer_project(project)
+    rows = [(label("Категория", "Category"), localized_project_value(project["category"], lang)),
+            (label("Город", "City"), project["city"]),
+            (label("Район", "Area"), project["district"])]
+    if developer:
+        rows += [(label("Застройщик", "Developer"), project["developer_name"]),
+                 (label("Проект", "Project"), project["project_name"] or project["title"]),
+                 (label("Меблировка", "Furnishing"), localized_project_value(project["furnishing"], lang))]
+        for unit, unit_label in UNIT_TYPES:
+            start, maximum = project[unit + "_price_aed"], project[unit + "_max_price_aed"]
+            if start:
+                value = format_price(start, currency)
+                if maximum:
+                    value += " – " + format_price(maximum, currency)
+                    if project[unit + "_max_estimated"]:
+                        value += label(" (верхняя цена — оценка)", " (estimated upper price)")
+                rows.append((unit_label, value))
+            if project[unit + "_area"]:
+                rows.append((unit_label + label(" · Площадь", " · Area"), localized_project_value(project[unit + "_area"], lang)))
+        rows += [(label("Рассрочка", "Payment plan"), project_text(project, "payment_plan", lang)),
+                 (label("Ключи", "Handover"), project_text(project, "handover", lang))]
+        title = label("От застройщика", "From developer")
+        comment = project_text(project, "developer_comment", lang)
+    else:
+        for field, ru, english in [("building", "Здание", "Building"), ("rooms", "Комнаты", "Bedrooms"), ("bathrooms", "Санузлы", "Bathrooms"),
+                                   ("floor_level", "Этаж", "Floor"), ("parking", "Парковка", "Parking"), ("availability", "Статус", "Availability"),
+                                   ("furnishing", "Меблировка", "Furnishing"), ("balcony", "Балкон", "Balcony"), ("area", "Площадь", "Area")]:
+            rows.append((label(ru, english), localized_project_value(project[field], lang)))
+        rows.append((label("Цена", "Price"), format_price(project["price"], currency)))
+        title = label("Лот: ", "Property: ") + project_display_name(project, lang)
+        comment = project_text(project, "description", lang)
+        if project["distress"]:
+            rows.append(("Special deal", "Distress opportunity"))
+        if project["original_price"]:
+            rows.append(("Original price", format_price(project["original_price"], currency)))
     if project["market_price"]:
-        rows.append(("📊", "Средняя цена рынка", f"{money(project['market_price'])} AED"))
-        discount = pct_below(project["price"], project["market_price"])
-        if discount is not None and discount > 0:
-            rows.append(("📉", "Ниже рынка", f"на {discount}%"))
-    if project["distress"]:
-        rows.append(("🔥", "Special deal", "distress opportunity"))
-    if project["original_price"]:
-        rows.append(("🧾", "Original price", f"{money(project['original_price'])} AED"))
-        discount = pct_below(project["price"], project["original_price"])
-        if discount is not None and discount > 0:
-            rows.append(("🎯", "Выгода от original price", f"на {discount}%"))
-
-    lines = [f"<b>Лот: {html.escape(project['title'])}</b>", ""]
-    for icon, label, value in rows:
-        if value not in (None, ""):
-            lines.append(f"{icon} <b>{label}:</b> {html.escape(str(value))}")
-    if project["description"]:
-        lines.extend(["", html.escape(project["description"])])
+        rows.append((label("Средняя цена рынка", "Average market price"), format_price(project["market_price"], currency)))
+    discount = project_discount(project)
+    if discount and discount > 0:
+        rows.append((label("Ниже рынка", "Below market"), f"{discount:g}%"))
+    lines = [f"<b>{html.escape(title)}</b>", ""]
+    lines.extend(f"<b>{key}:</b> {html.escape(str(value))}" for key, value in rows if value not in (None, ""))
+    if comment:
+        lines += ["", html.escape(comment)]
     return "\n".join(lines)
 
 
@@ -821,7 +870,81 @@ def app_media_path(file_name):
     return f"/media/{urllib.parse.quote(file_name)}"
 
 
+def subscriber_preferences(chat_id):
+    with db() as conn:
+        row = conn.execute("select language, currency from subscribers where chat_id=?", (chat_id,)).fetchone()
+    return (row["language"] or "", row["currency"] or "AED") if row else ("", "AED")
+
+
+def bot_phrase(chat_id, ru, en):
+    return en if subscriber_preferences(chat_id)[0] == "en" else ru
+
+
+def configure_subscriber_menu(chat_id):
+    lang, currency = subscriber_preferences(chat_id)
+    if PUBLIC_BASE_URL and lang:
+        telegram_api("setChatMenuButton", {"chat_id": chat_id, "menu_button": {
+            "type": "web_app", "text": "Catalog" if lang == "en" else "Каталог",
+            "web_app": {"url": f"{PUBLIC_BASE_URL}/app?lang={lang}&currency={currency}"}}})
+
+
+def language_prompt(chat_id):
+    return send_message(chat_id, "Выберите язык / Choose your language", inline_keyboard([[{"text": "Русский", "callback_data": "lang:ru"}, {"text": "English", "callback_data": "lang:en"}]]))
+
+
+BOT_EN = {
+    "💬 Хочу узнать подробнее": "💬 Request details", "👀 Смотреть еще": "👀 Show more", "🏙 Открыть каталог": "🏙 Open catalog",
+    "🎯 Искать по фильтрам": "🎯 Search with filters", "🔎 Изменить фильтры": "🔎 Change filters", "👀 Показать просмотренные": "👀 Show viewed properties",
+    "♻️ Сбросить фильтры": "♻️ Reset filters", "👀 Смотреть без фильтров": "👀 Browse all", "🔎 Применить другие фильтры": "🔎 Apply other filters",
+    "✈️ Написать в Telegram": "✈️ Contact via Telegram", "📞 Оставить телефон": "📞 Leave phone number", "🟢 Оставить WhatsApp": "🟢 Leave WhatsApp number",
+    "📞 Отправить телефон": "📞 Share phone number", "Отправить телефон": "Share phone number", "📝 Оставить заявку на подбор": "📝 Request a property selection",
+    "✅ Да, актуальна": "✅ Yes, I am interested", "👀 Пока нет": "👀 Not yet", "✅ Да, подобрать": "✅ Yes, find properties", "👀 Пока просто смотрю": "👀 Just browsing",
+    "💬 Открыть диалог с @roi_counter": "💬 Chat with @roi_counter", "Любые комнаты": "Any bedrooms", "Все районы": "All areas",
+    "Фильтры сброшены. Как продолжим?": "Filters reset. How would you like to continue?",
+    "Выберите количество комнат:": "Choose the number of bedrooms:", "Теперь выберите район:": "Now choose an area:",
+    "По выбранному количеству комнат сейчас нет активных районов.": "There are no available properties with this bedroom count.",
+    "Получили сообщение. Менеджер ответит вам здесь.": "Message received. Your broker will reply here.",
+    "Показываю актуальные лоты без фильтров.": "Here are the available properties without filters.",
+    "Как вам удобнее, чтобы @roi_counter связался с вами для персонального подбора?": "How would you like @roi_counter to contact you for a personal property selection?",
+    "Нажмите кнопку ниже, чтобы поделиться номером телефона.": "Tap the button below to share your phone number.",
+    "Напишите номер WhatsApp одним сообщением.": "Send your WhatsApp number in one message.",
+    "Понял, спасибо. Каталог всегда доступен здесь, а когда покупка станет актуальна, я помогу подобрать варианты ниже рынка.": "Thank you. The catalog is always available here. When you are ready to buy, I can help you find below-market properties.",
+    "Нажмите «Смотреть объекты», чтобы получить актуальный лот.": "Tap Browse properties to see an available property.",
+    "Выберите кнопку заявки под лотом или запросите персональный подбор.": "Use the request button below a property or ask for a personal selection.",
+    "Куда отправить подробную информацию?": "Where should I send the details?", "Куда отправить подробную информацию по этому лоту?": "Where should I send the details of this property?",
+    "Подробнее:": "Details:",
+}
+
+
+def localize_bot_message(chat_id, text):
+    if subscriber_preferences(chat_id)[0] != "en":
+        return text
+    if text in BOT_EN:
+        return BOT_EN[text]
+    match = re.fullmatch(r"По выбранным фильтрам все (\d+) лотов уже просмотрены\..*", text)
+    if match:
+        return f"You have viewed all {match[1]} properties matching your filters. Change the filters or view them again."
+    match = re.fullmatch(r"Нашла подходящих вариантов: (\d+)\. Новых для просмотра: (\d+)\..*", text)
+    if match:
+        return f"Found {match[1]} matching properties, including {match[2]} you have not viewed. I will send them one by one."
+    return text
+
+
+def localize_bot_keyboard(chat_id, keyboard):
+    if not keyboard:
+        return keyboard
+    data = json.loads(keyboard) if isinstance(keyboard, str) else keyboard
+    for rows in (data.get("inline_keyboard", []), data.get("keyboard", [])):
+        for row in rows:
+            for button in row:
+                if "text" in button:
+                    button["text"] = localize_bot_message(chat_id, button["text"])
+    return json.dumps(data, ensure_ascii=False)
+
+
 def send_message(chat_id, text, keyboard=None, parse_mode="HTML"):
+    text = localize_bot_message(chat_id, text)
+    keyboard = localize_bot_keyboard(chat_id, keyboard)
     payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
     if parse_mode:
         payload["parse_mode"] = parse_mode
@@ -1245,102 +1368,71 @@ def first_active_project():
         ).fetchone()
 
 
-def project_order_clause(random_order=False):
-    return "random()" if random_order else "p.created_at asc, p.id asc"
+def bot_filter_sql(sub):
+    where, params = ["p.status='active'"], []
+    if sub and sub["filter_rooms"]:
+        rooms = sub["filter_rooms"]
+        unit = {label.lower(): key for key, label in UNIT_TYPES}.get(rooms.lower())
+        where.append(f"(p.rooms=? or (p.listing_type='developer' and p.{unit}_price_aed>0))" if unit else "p.rooms=?")
+        params.append(rooms)
+    if sub and sub["filter_district"]:
+        where.append("p.district=?")
+        params.append(sub["filter_district"])
+    if sub and sub["filter_developer"]:
+        where.append("p.listing_type='developer'")
+    if sub and sub["filter_distress"]:
+        where.append("p.distress=1")
+    return " and ".join(where), params
+
+
+def project_order_clause(random_order=False, sub=None):
+    if random_order:
+        return "random()"
+    sort = sub["filter_sort"] if sub else "relevance"
+    unit = {label.lower(): key for key, label in UNIT_TYPES}.get((sub["filter_rooms"] or "").lower()) if sub else None
+    price = f"case when p.listing_type='developer' then p.{unit}_price_aed else p.price end" if unit else "p.price"
+    if sort in ("price_asc", "price_desc"):
+        return f"({price} <= 0 or {price} is null), {price} " + ("asc" if sort == "price_asc" else "desc") + ", p.id desc"
+    if sort == "discount_desc":
+        discount = discount_sql("p.")
+        return f"({discount} is null), {discount} desc, p.updated_at desc, p.id desc"
+    if sort == "popular":
+        return "((select count(*) from catalog_events ce where ce.project_id=p.id and ce.event_type='catalog_lot_view') + (select count(*) from bot_events be where be.project_id=p.id and be.event_type='click_interest')) desc, p.id desc"
+    return "p.updated_at desc, p.id desc"
 
 
 def next_project_for(chat_id, exclude_id=None, include_seen_filtered=False, random_order=False):
     with db() as conn:
-        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
-        has_filters = bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
-        params = [chat_id]
-        extra = ""
-        if exclude_id:
-            extra = "and p.id != ?"
-            params.append(exclude_id)
-        if sub and sub["filter_rooms"]:
-            extra += " and p.rooms = ?"
-            params.append(sub["filter_rooms"])
-        if sub and sub["filter_district"]:
-            extra += " and p.district = ?"
-            params.append(sub["filter_district"])
-        project = conn.execute(
-            f"""
-            select p.* from projects p
-            left join seen_projects s on s.project_id = p.id and s.chat_id = ?
-            where p.status = 'active' and s.project_id is null {extra}
-            order by {project_order_clause(random_order)}
-            limit 1
-            """,
-            params,
-        ).fetchone()
-        if project or not has_filters or not include_seen_filtered:
+        sub = conn.execute("select * from subscribers where chat_id=?", (chat_id,)).fetchone()
+        where, params = bot_filter_sql(sub)
+        order = project_order_clause(random_order, sub)
+        excluded = " and p.id != ?" if exclude_id else ""
+        excluded_params = [exclude_id] if exclude_id else []
+        project = conn.execute(f"select p.* from projects p where {where}{excluded} and not exists (select 1 from seen_projects sp where sp.project_id=p.id and sp.chat_id=?) order by {order} limit 1", params + excluded_params + [chat_id]).fetchone()
+        if project or not include_seen_filtered:
             return project
-
-        params = []
-        extra = ""
-        if exclude_id:
-            extra = "and p.id != ?"
-            params.append(exclude_id)
-        if sub and sub["filter_rooms"]:
-            extra += " and p.rooms = ?"
-            params.append(sub["filter_rooms"])
-        if sub and sub["filter_district"]:
-            extra += " and p.district = ?"
-            params.append(sub["filter_district"])
-        project = conn.execute(
-            f"""
-            select p.* from projects p
-            where p.status = 'active' {extra}
-            order by {project_order_clause(random_order)}
-            limit 1
-            """,
-            params,
-        ).fetchone()
-        if project or not exclude_id:
-            return project
-
-        params = []
-        extra = ""
-        if sub and sub["filter_rooms"]:
-            extra += " and p.rooms = ?"
-            params.append(sub["filter_rooms"])
-        if sub and sub["filter_district"]:
-            extra += " and p.district = ?"
-            params.append(sub["filter_district"])
-        return conn.execute(
-            f"""
-            select p.* from projects p
-            where p.status = 'active' {extra}
-            order by {project_order_clause(random_order)}
-            limit 1
-            """,
-            params,
-        ).fetchone()
+        project = conn.execute(f"select p.* from projects p where {where}{excluded} order by {order} limit 1", params + excluded_params).fetchone()
+        return project or conn.execute(f"select p.* from projects p where {where} order by {order} limit 1", params).fetchone()
 
 
 def filtered_projects_counts(chat_id):
     with db() as conn:
-        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
-        params = []
-        where = "where status = 'active'"
-        if sub and sub["filter_rooms"]:
-            where += " and rooms = ?"
-            params.append(sub["filter_rooms"])
-        if sub and sub["filter_district"]:
-            where += " and district = ?"
-            params.append(sub["filter_district"])
-        total = conn.execute(f"select count(*) c from projects {where}", params).fetchone()["c"]
-        unseen = conn.execute(
-            f"""
-            select count(*) c from projects p
-            left join seen_projects s on s.project_id = p.id and s.chat_id = ?
-            {where.replace('status', 'p.status').replace('rooms', 'p.rooms').replace('district', 'p.district')}
-              and s.project_id is null
-            """,
-            [chat_id] + params,
-        ).fetchone()["c"]
+        sub = conn.execute("select * from subscribers where chat_id=?", (chat_id,)).fetchone()
+        where, params = bot_filter_sql(sub)
+        total = conn.execute(f"select count(*) from projects p where {where}", params).fetchone()[0]
+        unseen = conn.execute(f"select count(*) from projects p where {where} and not exists (select 1 from seen_projects sp where sp.project_id=p.id and sp.chat_id=?)", params + [chat_id]).fetchone()[0]
         return total, unseen
+
+
+def send_filter_options(chat_id):
+    with db() as conn:
+        sub = conn.execute("select filter_developer, filter_distress from subscribers where chat_id=?", (chat_id,)).fetchone()
+    en = subscriber_preferences(chat_id)[0] == "en"
+    buttons = [[{"text": ("☑ " if sub and sub["filter_developer"] else "☐ ") + ("From developer" if en else "От застройщика"), "callback_data": "filter_developer_toggle"}]]
+    buttons.append([{"text": ("☑ " if sub and sub["filter_distress"] else "☐ ") + ("Distress only" if en else "Только дистресс"), "callback_data": "filter_distress_toggle"}])
+    for key, ru, english in [("relevance", "По релевантности", "Relevance"), ("popular", "По популярности", "Popularity"), ("price_asc", "Цена: по возрастанию", "Price: low to high"), ("price_desc", "Цена: по убыванию", "Price: high to low"), ("discount_desc", "По скидке к рынку", "Market discount")]:
+        buttons.append([{"text": english if en else ru, "callback_data": "filter_sort:" + key}])
+    send_message(chat_id, "Choose a source and sort order:" if en else "Выберите источник объектов и сортировку:", inline_keyboard(buttons))
 
 
 def offer_filter_change(chat_id, total):
@@ -1374,8 +1466,8 @@ def offer_after_filter_reset(chat_id):
 
 def subscriber_filters_active(chat_id):
     with db() as conn:
-        sub = conn.execute("select filter_rooms, filter_district from subscribers where chat_id = ?", (chat_id,)).fetchone()
-    return bool(sub and (sub["filter_rooms"] or sub["filter_district"]))
+        sub = conn.execute("select filter_rooms, filter_district, filter_developer, filter_distress from subscribers where chat_id = ?", (chat_id,)).fetchone()
+    return bool(sub and (sub["filter_rooms"] or sub["filter_district"] or sub["filter_developer"] or sub["filter_distress"]))
 
 
 def subscriber_repeats_seen_filters(chat_id):
@@ -1389,7 +1481,7 @@ def active_rooms_options():
         return [
             row["rooms"]
             for row in conn.execute(
-                "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
+                "select distinct rooms from projects where status='active' and listing_type!='developer' and rooms != '' union select 'Studio' union select '1BR' union select '2BR' union select '3BR' order by rooms"
             ).fetchall()
         ]
 
@@ -1399,7 +1491,8 @@ def active_district_options(rooms=None):
         params = []
         where = "where status='active' and district != ''"
         if rooms:
-            where += " and rooms = ?"
+            unit = {label.lower(): key for key, label in UNIT_TYPES}.get(rooms.lower())
+            where += f" and (rooms=? or (listing_type='developer' and {unit}_price_aed>0))" if unit else " and rooms=?"
             params.append(rooms)
         return [
             row["district"]
@@ -1413,9 +1506,12 @@ def send_project(chat_id, project, user=None):
         send_no_projects_message(chat_id)
         log_perf("send_project", started_at, chat_id=chat_id, project_id="none")
         return False
-    caption = project_caption(project)
+    lang, currency = subscriber_preferences(chat_id)
+    if not lang:
+        return False
+    caption = project_caption(project, lang=lang, currency=currency)
     media = get_project_media(project["id"])
-    result = send_project_card(chat_id, project, media, caption, project_actions_keyboard(project["id"], subscriber_filters_active(chat_id)))
+    result = send_project_card(chat_id, project, media, caption, localize_bot_keyboard(chat_id, project_actions_keyboard(project["id"], subscriber_filters_active(chat_id))))
     update_delivery_status(chat_id, result)
     if not result or not result.get("ok"):
         log_perf("send_project", started_at, chat_id=chat_id, project_id=project["id"], ok=False)
@@ -1439,15 +1535,17 @@ def project_actions_keyboard(project_id, filters_active=False):
     rows = [
         [{"text": "💬 Хочу узнать подробнее", "callback_data": f"interest:{project_id}"}],
         [{"text": "👀 Смотреть еще", "callback_data": f"next:{project_id}"}],
+        [{"text": "AED", "callback_data": f"currency:AED:{project_id}"}, {"text": "USD ($)", "callback_data": f"currency:USD:{project_id}"}],
     ]
     return inline_keyboard(rows)
 
 
-def welcome_keyboard():
+def welcome_keyboard(chat_id=None):
     rows = []
     if PUBLIC_BASE_URL:
-        rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app"}}])
+        rows.append([{"text": "🏙 Открыть каталог", "web_app": {"url": f"{PUBLIC_BASE_URL}/app?lang={subscriber_preferences(chat_id)[0] or 'ru'}&currency={subscriber_preferences(chat_id)[1]}"}}])
     rows.append([{"text": "🎯 Искать по фильтрам", "callback_data": "filter_start"}])
+    rows.append([{ "text": "Русский / English", "callback_data": "choose_language"}, {"text": "AED / USD", "callback_data": "choose_currency"}])
     return inline_keyboard(rows)
 
 
@@ -1466,7 +1564,12 @@ def send_welcome_message(chat_id):
         "Если хотите просто посмотреть рынок — откройте каталог.\n"
         "Если уже есть запрос по бюджету, району или цели покупки — начните с фильтров."
     )
-    send_message(chat_id, text, keyboard=welcome_keyboard())
+    if subscriber_preferences(chat_id)[0] == "en":
+        text = ("Welcome to Below Market Dubai 🏙\n\nI'm Alexander, a licensed real estate broker in Dubai.\n\n"
+                "Here I share below-market properties: distress deals, urgent sales and opportunities that are often absent from public listings.\n\n"
+                "Browse available properties, compare prices, open the catalog or filter by area and bedroom count. "
+                "New offers arrive twice a day, with no overnight notifications.\n\nOpen the catalog to explore, or start with the filters if you know what you are looking for.")
+    send_message(chat_id, text, keyboard=welcome_keyboard(chat_id))
 
 
 def send_no_projects_message(chat_id):
@@ -1476,6 +1579,8 @@ def send_no_projects_message(chat_id):
         "подберём варианты под бюджет, район, цель покупки и желаемую доходность.\n\n"
         "Оставьте заявку, и <a href=\"https://t.me/roi_counter\">@roi_counter</a> с вами свяжется."
     )
+    if subscriber_preferences(chat_id)[0] == "en":
+        text = "There are no new available properties right now.\n\nWe can find below-market properties in Dubai for your budget, preferred area and investment goals.\n\nLeave a request and <a href='https://t.me/roi_counter'>@roi_counter</a> will contact you."
     keyboard = inline_keyboard(
         [[{"text": "📝 Оставить заявку на подбор", "callback_data": "personal_interest"}]]
     )
@@ -1495,6 +1600,8 @@ def followup_variant_label(variant):
 
 
 def send_catalog_followup(chat_id, name, variant="a"):
+    if not subscriber_preferences(chat_id)[0]:
+        return None
     first_name = (name or "").strip()
     greeting = f"Здравствуйте, {html.escape(first_name)}!" if first_name else "Здравствуйте!"
     if variant == "b":
@@ -1520,6 +1627,11 @@ def send_catalog_followup(chat_id, name, variant="a"):
             {"text": "✅ Да, подобрать", "callback_data": "catalog_followup_yes"},
             {"text": "👀 Пока просто смотрю", "callback_data": "catalog_followup_no"},
         ]
+    if subscriber_preferences(chat_id)[0] == "en":
+        greeting = f"Hello, {html.escape(first_name)}!" if first_name else "Hello!"
+        text = greeting + "\nThis is Alexander. Thank you for checking out my bot.\n" + (
+            "I would be happy to advise you on buying property in Dubai. Are you currently looking to buy?" if variant == "b" else
+            "I see you explored the catalog. Would you like me to select 3–5 below-market properties for your budget and goals?")
     keyboard = inline_keyboard(
         [
             buttons
@@ -1534,6 +1646,7 @@ def send_catalog_positive_reply(chat_id, user):
         "В скором времени я свяжусь с вами по поводу консультации в личных сообщениях.\n\n"
         "@roi_counter"
     )
+    text = bot_phrase(chat_id, text, "Thank you for your reply. I will contact you shortly via private messages to discuss your property search.\n\n@roi_counter")
     keyboard = inline_keyboard(
         [[{"text": "💬 Открыть диалог с @roi_counter", "url": "https://t.me/roi_counter"}]]
     )
@@ -1552,7 +1665,7 @@ def send_filter_rooms_prompt(chat_id):
     if not rooms:
         send_no_projects_message(chat_id)
         return
-    buttons = [[{"text": room, "callback_data": f"filter_rooms:{room}"}] for room in rooms[:20]]
+    buttons = [[{"text": "Любые комнаты", "callback_data": "filter_rooms:"}]] + [[{"text": room, "callback_data": f"filter_rooms:{room}"}] for room in rooms[:20]]
     buttons.append([{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}])
     send_message(chat_id, "Выберите количество комнат:", keyboard=inline_keyboard(buttons))
 
@@ -1562,7 +1675,7 @@ def send_filter_district_prompt(chat_id, rooms):
     if not districts:
         send_message(chat_id, "По выбранному количеству комнат сейчас нет активных районов.", keyboard=inline_keyboard([[{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}]]))
         return
-    buttons = [[{"text": district, "callback_data": f"filter_district:{urllib.parse.quote(district)}"}] for district in districts[:30]]
+    buttons = [[{"text": "Все районы", "callback_data": "filter_district:"}]] + [[{"text": district, "callback_data": f"filter_district:{urllib.parse.quote(district)}"}] for district in districts[:30] if len(("filter_district:" + urllib.parse.quote(district)).encode()) <= 64]
     buttons.append([{"text": "♻️ Сбросить фильтры", "callback_data": "filter_reset"}])
     send_message(chat_id, "Теперь выберите район:", keyboard=inline_keyboard(buttons))
 
@@ -1686,11 +1799,17 @@ def segment_subscribers(segment):
         ).fetchall()
 
 
-def send_segment_message(segment, text):
+def send_segment_message(segment, text, text_en=""):
     subscribers = segment_subscribers(segment)
     count = 0
     for sub in subscribers:
-        if send_admin_message(sub["chat_id"], text):
+        lang = sub["language"]
+        if not lang:
+            continue
+        message = text_en if lang == "en" else text
+        if not message or (lang == "en" and re.search(r"[А-Яа-яЁё]", message)):
+            continue
+        if send_admin_message(sub["chat_id"], message):
             count += 1
         time.sleep(0.05)
     return count, len(subscribers)
@@ -1736,7 +1855,9 @@ def lead_name(user):
     return " ".join([p for p in parts if p]) or user.get("username") or str(user.get("id"))
 
 
-def lead_thank_you_text(user):
+def lead_thank_you_text(user, chat_id=None):
+    if subscriber_preferences(chat_id or user.get("id"))[0] == "en":
+        return "Thank you! I have received your request. I will message you on Telegram with the property details."
     name = user.get("first_name") or user.get("username")
     greeting = f"Спасибо, {name}!" if name else "Спасибо!"
     return f"{greeting} Я получил ваш запрос. Напишу вам в Telegram и подскажу детали по объекту."
@@ -1875,45 +1996,36 @@ def create_personal_lead_async(chat_id, user, method=None, value=None):
     ).start()
 
 
-def handle_start(chat_id, user, payload=""):
-    diagnostic = re.fullmatch(r"yd_test_ref_([A-Za-z0-9_-]{1,48})", payload)
-    if diagnostic:
-        BOT_METRIKA.record_test_start(chat_id, payload)
-        code = diagnostic.group(1)
-        record_referral_visit(code, chat_id, user, diagnostic=True)
-        log_event(chat_id, user, "start_yandex_test", payload=code)
-        send_welcome_message(chat_id)
-        return
-    BOT_METRIKA.record_start(chat_id, payload)
-    upsert_subscriber(user, chat_id)
-    attribution = parse_yandex_start(payload)
-    if attribution:
-        yclid, code = attribution
-        link = record_referral_visit(code or "yandex_direct", chat_id, user, yclid=yclid)
-        log_event(chat_id, user, "start_yandex", payload=json.dumps(
-            {"code": code, "yclid": yclid, "name": link["name"] if link else "",
-             "source": (link["source"] or "Яндекс Директ") if link else "Яндекс Директ"},
-            ensure_ascii=False,
-        ))
-        send_welcome_message(chat_id)
-        return
-    if payload.startswith("ref_"):
-        code = normalize_referral_code(payload.removeprefix("ref_"))
-        link = record_referral_visit(code, chat_id, user)
-        log_event(
-            chat_id,
-            user,
-            "start_referral",
-            payload=json.dumps(
-                {"code": code, "name": link["name"] if link else "", "source": link["source"] if link else ""},
-                ensure_ascii=False,
-            ),
-        )
-        send_welcome_message(chat_id)
-        return
-    if payload == "web_teaser":
-        log_event(chat_id, user, "start_web_teaser", payload=payload)
-        send_welcome_message(chat_id)
+def handle_start(chat_id, user, payload="", resume=False):
+    if not resume:
+        diagnostic = re.fullmatch(r"yd_test_ref_([A-Za-z0-9_-]{1,48})", payload)
+        if diagnostic:
+            BOT_METRIKA.record_test_start(chat_id, payload)
+        else:
+            BOT_METRIKA.record_start(chat_id, payload)
+        upsert_subscriber(user, chat_id)
+        attribution = parse_yandex_start(payload)
+        if diagnostic:
+            code = diagnostic.group(1)
+            record_referral_visit(code, chat_id, user, diagnostic=True)
+            log_event(chat_id, user, "start_yandex_test", payload=code)
+        elif attribution:
+            yclid, code = attribution
+            link = record_referral_visit(code or "yandex_direct", chat_id, user, yclid=yclid)
+            log_event(chat_id, user, "start_yandex", payload=json.dumps(
+                {"code": code, "yclid": yclid, "name": link["name"] if link else "",
+                 "source": (link["source"] or "Яндекс Директ") if link else "Яндекс Директ"}, ensure_ascii=False))
+        elif payload.startswith("ref_"):
+            code = normalize_referral_code(payload.removeprefix("ref_"))
+            link = record_referral_visit(code, chat_id, user)
+            log_event(chat_id, user, "start_referral", payload=json.dumps(
+                {"code": code, "name": link["name"] if link else "", "source": link["source"] if link else ""}, ensure_ascii=False))
+        elif payload == "web_teaser":
+            log_event(chat_id, user, "start_web_teaser", payload=payload)
+    if not subscriber_preferences(chat_id)[0]:
+        with db() as conn:
+            conn.execute("update subscribers set pending_start=? where chat_id=?", (payload, chat_id))
+        language_prompt(chat_id)
         return
     if payload.startswith("lot_"):
         try:
@@ -1924,8 +2036,8 @@ def handle_start(chat_id, user, payload=""):
         if project and project["status"] == "active":
             log_event(chat_id, user, "start_shared_lot", project_id=project["id"], payload=payload)
             send_project(chat_id, project, user=user)
-            return
-        send_no_projects_message(chat_id)
+        else:
+            send_no_projects_message(chat_id)
         return
     send_welcome_message(chat_id)
 
@@ -1949,6 +2061,9 @@ def handle_text(message):
             send_message(chat_id, "Нажмите «Смотреть объекты», чтобы получить актуальный лот.")
             return
 
+        if not sub["language"]:
+            language_prompt(chat_id)
+            return
         project_id = sub["state_project_id"]
         if contact:
             value = contact.get("phone_number")
@@ -1963,14 +2078,14 @@ def handle_text(message):
                 return
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user, chat_id), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if sub["state"] == "awaiting_personal_whatsapp":
             create_personal_lead(chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user, chat_id), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if not sub["state_project_id"]:
@@ -1981,14 +2096,14 @@ def handle_text(message):
             create_lead(project_id, chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user, chat_id), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         if sub["state"] == "awaiting_custom_whatsapp":
             create_custom_broadcast_lead(project_id, chat_id, user, method="whatsapp", value=text)
             with db() as conn:
                 conn.execute("update subscribers set state=null, state_project_id=null where chat_id = ?", (chat_id,))
-            send_message(chat_id, lead_thank_you_text(user), keyboard=json.dumps({"remove_keyboard": True}))
+            send_message(chat_id, lead_thank_you_text(user, chat_id), keyboard=json.dumps({"remove_keyboard": True}))
             return
 
         handle_incoming_chat_message(chat_id, user, text)
@@ -2018,6 +2133,39 @@ def handle_callback_inner(callback):
     upsert_subscriber(user, chat_id)
     telegram_api("answerCallbackQuery", {"callback_query_id": query_id})
 
+    if data == "choose_language":
+        language_prompt(chat_id)
+        return
+    if data in ("lang:ru", "lang:en"):
+        lang = data.split(":")[1]
+        with db() as conn:
+            sub = conn.execute("select pending_start from subscribers where chat_id=?", (chat_id,)).fetchone()
+            pending = sub["pending_start"] if sub else None
+            conn.execute("update subscribers set language=?, pending_start=null where chat_id=?", (lang, chat_id))
+        log_event(chat_id, user, "click_language", payload=data)
+        configure_subscriber_menu(chat_id)
+        handle_start(chat_id, user, pending or "", resume=True)
+        return
+    if not subscriber_preferences(chat_id)[0]:
+        language_prompt(chat_id)
+        return
+    if data == "choose_currency":
+        send_message(chat_id, bot_phrase(chat_id, "Выберите валюту:", "Choose your currency:"), inline_keyboard([[{"text": "AED", "callback_data": "currency:AED"}, {"text": "USD ($)", "callback_data": "currency:USD"}]]))
+        return
+    if data.startswith("currency:"):
+        parts = data.split(":")
+        if parts[1] not in ("AED", "USD"):
+            return
+        with db() as conn:
+            conn.execute("update subscribers set currency=? where chat_id=?", (parts[1], chat_id))
+        configure_subscriber_menu(chat_id)
+        if len(parts) == 3 and parts[2].isdigit():
+            project = get_project(int(parts[2]))
+            if project and project["status"] == "active":
+                send_project(chat_id, project, user)
+        else:
+            send_welcome_message(chat_id)
+        return
     if data == "start_view":
         log_event(chat_id, user, "click_start_view", payload=data)
         send_project(chat_id, next_project_for(chat_id), user=user)
@@ -2027,20 +2175,37 @@ def handle_callback_inner(callback):
         log_event(chat_id, user, "click_filter_start", payload=data)
         with db() as conn:
             conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
-        send_filter_rooms_prompt(chat_id)
+        send_filter_options(chat_id)
         return
 
+    if data == "filter_developer_toggle":
+        with db() as conn:
+            conn.execute("update subscribers set filter_developer=1-filter_developer where chat_id=?", (chat_id,))
+        send_filter_options(chat_id)
+        return
+    if data == "filter_distress_toggle":
+        with db() as conn:
+            conn.execute("update subscribers set filter_distress=1-filter_distress where chat_id=?", (chat_id,))
+        send_filter_options(chat_id)
+        return
+    if data.startswith("filter_sort:"):
+        sort = data.split(":", 1)[1]
+        if sort in ("relevance", "popular", "price_asc", "price_desc", "discount_desc"):
+            with db() as conn:
+                conn.execute("update subscribers set filter_sort=? where chat_id=?", (sort, chat_id))
+            send_filter_rooms_prompt(chat_id)
+        return
     if data == "filter_reset":
         log_event(chat_id, user, "click_filter_reset", payload=data)
         with db() as conn:
-            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null, filter_developer=0, filter_distress=0, filter_sort='relevance' where chat_id = ?", (chat_id,))
         offer_after_filter_reset(chat_id)
         return
 
     if data == "filter_view_all":
         log_event(chat_id, user, "click_filter_view_all", payload=data)
         with db() as conn:
-            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null where chat_id = ?", (chat_id,))
+            conn.execute("update subscribers set state=null, filter_rooms=null, filter_district=null, filter_developer=0, filter_distress=0, filter_sort='relevance' where chat_id = ?", (chat_id,))
         send_message(chat_id, "Показываю актуальные лоты без фильтров.")
         send_project(chat_id, next_project_for(chat_id), user=user)
         return
@@ -2088,7 +2253,7 @@ def handle_callback_inner(callback):
     if data == "personal_tg":
         log_event(chat_id, user, "click_personal_tg", payload=data)
         create_personal_lead(chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, lead_thank_you_text(user))
+        send_message(chat_id, lead_thank_you_text(user, chat_id))
         return
 
     if data == "personal_phone":
@@ -2141,13 +2306,6 @@ def handle_callback_inner(callback):
         return
 
     action, _, raw_project_id = data.partition(":")
-    if action == "lang" and raw_project_id in ("ru", "en"):
-        log_event(chat_id, user, "click_language", payload=data)
-        with db() as conn:
-            conn.execute("update subscribers set language = ? where chat_id = ?", (raw_project_id, chat_id))
-        send_project(chat_id, first_active_project(), user=user)
-        return
-
     try:
         project_id = int(raw_project_id)
     except ValueError:
@@ -2196,7 +2354,7 @@ def handle_callback_inner(callback):
     elif action == "custom_tg" and project_id:
         log_event(chat_id, user, "click_custom_tg", broadcast_id=project_id, payload=data)
         create_custom_broadcast_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, lead_thank_you_text(user))
+        send_message(chat_id, lead_thank_you_text(user, chat_id))
     elif action == "custom_phone" and project_id:
         log_event(chat_id, user, "click_custom_phone", broadcast_id=project_id, payload=data)
         with db() as conn:
@@ -2227,7 +2385,7 @@ def handle_callback_inner(callback):
     elif action == "contact_tg" and project_id:
         log_event(chat_id, user, "click_contact_tg", project_id=project_id, payload=data)
         create_lead(project_id, chat_id, user, method="telegram", value=f"@{user.get('username')}" if user.get("username") else str(chat_id))
-        send_message(chat_id, lead_thank_you_text(user))
+        send_message(chat_id, lead_thank_you_text(user, chat_id))
     elif action == "contact_phone" and project_id:
         log_event(chat_id, user, "click_contact_phone", project_id=project_id, payload=data)
         with db() as conn:
@@ -2292,17 +2450,25 @@ def custom_broadcast_keyboard(broadcast_id):
     )
 
 
-def send_custom_to_all(broadcast_id, text, media_items):
+def send_custom_to_all(broadcast_id, text, media_items, text_en=""):
     started_at = time.perf_counter()
     count = 0
-    safe_text = html.escape(text)
     with db() as conn:
         subscribers = conn.execute("select chat_id from subscribers where coalesce(delivery_status, 'active') = 'active'").fetchall()
     for sub in subscribers:
         chat_id = sub["chat_id"]
+        lang, currency = subscriber_preferences(chat_id)
+        if not lang:
+            continue
+        message_text = text_en if lang == "en" else text
+        if lang == "en" and not message_text:
+            if re.search(r"[А-Яа-яЁё]", text):
+                continue
+            message_text = text
+        safe_text = html.escape(message_text)
         sent = False
         delivery_result = None
-        keyboard = custom_broadcast_keyboard(broadcast_id)
+        keyboard = localize_bot_keyboard(chat_id, custom_broadcast_keyboard(broadcast_id))
         if media_items:
             caption = safe_text if len(safe_text) <= 1024 else None
             if len(safe_text) > 1024:
@@ -2738,7 +2904,7 @@ def scheduler_loop(stop_event):
                     ).fetchall()
                 for item in custom_pending:
                     media_items = get_custom_broadcast_media(item["id"])
-                    count = send_custom_to_all(item["id"], item["text"], media_items)
+                    count = send_custom_to_all(item["id"], item["text"], media_items, item["text_en"] or "")
                     with db() as conn:
                         conn.execute(
                             "update custom_broadcasts set status='sent', sent_at=?, sent_count=? where id=?",
@@ -2926,16 +3092,21 @@ def build_active_projects_xlsx():
         ("description", "Дополнительное описание"),
         ("developer_name", "Застройщик"),
         ("project_name", "Название проекта"),
-        ("studio_price_usd", "Мин. цена Studio, USD"),
-        ("one_bed_price_usd", "Мин. цена 1BR, USD"),
-        ("two_bed_price_usd", "Мин. цена 2BR, USD"),
-        ("three_bed_price_usd", "Мин. цена 3BR, USD"),
+        ("studio_price_aed", "Мин. цена Studio, AED"),
+        ("one_bed_price_aed", "Мин. цена 1BR, AED"),
+        ("two_bed_price_aed", "Мин. цена 2BR, AED"),
+        ("three_bed_price_aed", "Мин. цена 3BR, AED"),
         ("payment_plan", "Рассрочка"),
         ("handover", "Ключи"),
         ("developer_comment", "Комментарий застройщика"),
         ("created_at", "Создан"),
         ("updated_at", "Обновлён"),
     ]
+    columns.extend([("below_market_pct", "Ниже рынка, %"), ("developer_comment_en", "Комментарий (English)"), ("description_en", "Описание (English)")])
+    for unit, label in UNIT_TYPES:
+        columns.extend([(unit + "_max_price_aed", f"Макс. цена {label}, AED"),
+                        (unit + "_max_estimated", f"Максимум {label} — оценка"),
+                        (unit + "_area", f"Площадь {label}")])
     with db() as conn:
         projects = conn.execute(
             "select * from projects where status = 'active' order by created_at asc, id asc"
@@ -3116,6 +3287,7 @@ def localized_project_value(value, lang="ru"):
     if not value:
         return ""
     translations_en = {
+        "по запросу": "On request", "нет данных": "Not specified", "есть": "Yes", "студия": "Studio", "от застройщика": "From developer",
         "высокий": "High",
         "низкий": "Low",
         "средний": "Middle",
@@ -3150,7 +3322,11 @@ def localized_project_value(value, lang="ru"):
         "townhouse": "Таунхаус",
     }
     mapping = translations_en if lang == "en" else translations_ru
-    return mapping.get(value.lower(), value)
+    translated = mapping.get(value.lower(), value)
+    if lang == "en":
+        translated = re.sub(r"кв\.?\s*м\.?|м²|м2", "m²", translated, flags=re.I)
+        translated = re.sub(r"\bмест(?:о|а)?\b", "space(s)", translated, flags=re.I)
+    return translated
 
 
 def project_display_name(project, lang="ru"):
@@ -3177,7 +3353,7 @@ def seo_description_for_project(project, lang="ru"):
     display_name = project_display_name(project, lang)
     if is_developer_project(project):
         min_price = developer_min_price(project)
-        price_text = f" from ${money(min_price)}" if min_price else ""
+        price_text = f" from {money(min_price)} AED" if min_price else ""
         if lang == "en":
             return f"Developer property in {project['city']}: {display_name}{price_text}. Payment plan, handover date, unit prices, and consultation from a licensed UAE broker."
         return f"Недвижимость от застройщика в {project['city']}: {display_name}{price_text}. Цены, рассрочка, срок сдачи и консультация лицензированного брокера."
@@ -3186,7 +3362,7 @@ def seo_description_for_project(project, lang="ru"):
     else:
         parts = [display_name, f"цена {money(project['price'])} AED"]
     if project["market_price"]:
-        discount = pct_below(project["price"], project["market_price"])
+        discount = project_discount(project)
         if discount and discount > 0:
             parts.append(f"{discount}% below market" if lang == "en" else f"ниже рынка на {discount}%")
     if project["distress"]:
@@ -3194,6 +3370,68 @@ def seo_description_for_project(project, lang="ru"):
     if lang == "en":
         return "Dubai property below market: " + ", ".join(parts) + ". View details and request a consultation from a licensed Dubai broker."
     return "Недвижимость в Дубае ниже рынка: " + ", ".join(parts) + ". Посмотрите детали и оставьте заявку лицензированному брокеру."
+
+
+def currency_controls(lang):
+    label = "Currency" if lang == "en" else "Валюта"
+    rate_label = f"1 USD = {AED_PER_USD} AED"
+    return f'''<div class="currency-switch" id="display-currency" role="group" aria-label="{label}" title="{rate_label}">
+      <button type="button" data-currency="AED" aria-pressed="true">AED</button>
+      <button type="button" data-currency="USD" aria-pressed="false">USD</button>
+    </div>'''
+
+
+def currency_script(lang):
+    return """<script>
+    (function() {
+      const rate = RATE;
+      const currencyButtons = document.querySelectorAll('#display-currency button[data-currency]');
+      const url = new URL(location.href);
+      let saved = 'AED';
+      try { saved = localStorage.getItem('display_currency') || 'AED'; } catch(e) {}
+      let currency = url.searchParams.get('currency') || saved;
+      if (!['AED', 'USD'].includes(currency)) currency = 'AED';
+      const records = [];
+      document.querySelectorAll('.lot-card, .lot-detail, .lot-seo-copy').forEach(root => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node.parentElement.closest('script, style, textarea, select')) continue;
+          if (/\d[\d \u00a0]* AED/.test(node.textContent)) records.push([node, node.textContent]);
+        }
+      });
+      const form = document.getElementById('catalog-filters');
+      let budgetCurrency = url.searchParams.get('currency') === 'USD' ? 'USD' : 'AED';
+      function render() {
+        records.forEach(([node, original]) => {
+          node.textContent = currency === 'AED' ? original : original.replace(/(\d[\d \u00a0]*(?:\.\d+)?) AED/g, (_, amount) => {
+            return Math.round(Number(amount.replace(/[ \u00a0]/g, '')) / rate).toLocaleString('en-US').replace(/,/g, ' ') + ' USD';
+          });
+        });
+        if (form) {
+          const input = form.elements.max_price;
+          const number = Number(input.value.replace(/ /g, '').replace(',', '.'));
+          if (input.value && Number.isFinite(number) && budgetCurrency !== currency) input.value = (currency === 'USD' ? number / rate : number * rate).toFixed(2);
+          input.placeholder = (LANG === 'en' ? 'Price up to, ' : 'Цена до, ') + currency;
+          budgetCurrency = currency;
+          form.elements.currency.value = currency;
+        }
+        document.querySelectorAll('a[href]').forEach(link => {
+          const target = new URL(link.href, location.href);
+          if (target.origin !== location.origin || !/^\/(app|ru|en)(\/|$)/.test(target.pathname)) return;
+          target.searchParams.set('currency', currency);
+          if (target.pathname.startsWith('/app')) target.searchParams.set('lang', LANG);
+          link.href = target.href;
+        });
+        currencyButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.currency === currency)));
+        url.searchParams.set('currency', currency);
+        window.history.replaceState(null, '', url);
+        try { localStorage.setItem('display_currency', currency); } catch(e) {}
+      }
+      currencyButtons.forEach(button => button.addEventListener('click', () => { currency = button.dataset.currency; render(); }));
+      render();
+    })();
+    </script>""".replace("RATE", str(AED_PER_USD)).replace("LANG", json.dumps(lang))
 
 
 def app_layout(
@@ -3401,6 +3639,14 @@ def app_layout(
     }});
   }})();
   </script>"""
+    if catalog_event in ("catalog_open", "catalog_lot_view"):
+        controls = currency_controls(lang)
+        switch_pattern = r'(<div class="language-switch"[^>]*>.*?</div>)'
+        if re.search(switch_pattern, content, flags=re.S):
+            content = re.sub(switch_pattern, lambda match: '<div class="catalog-preferences">' + controls + match[1] + '</div>', content, count=1, flags=re.S)
+        else:
+            content = '<div class="catalog-preferences standalone">' + controls + '</div>' + content
+        content += currency_script(lang)
     footer_html = ""
     if not noindex:
         catalog_path = "/en/" if lang == "en" else "/ru/"
@@ -3498,7 +3744,7 @@ def app_filter_options():
     return (
         list(districts_by_city),
         districts_by_city,
-        [row["rooms"] for row in rooms],
+        sorted(set([row["rooms"] for row in rooms] + [label for _, label in UNIT_TYPES])),
     )
 
 
@@ -3546,7 +3792,13 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     district = (query.get("district", [""])[0] or "").strip()
     rooms = (query.get("rooms", [""])[0] or "").strip()
     max_price = (query.get("max_price", [""])[0] or "").strip()
-    has_catalog_filters = any((search, city, district, rooms, max_price))
+    currency = "USD" if query.get("currency", ["AED"])[0] == "USD" else "AED"
+    developer_only = query.get("developer", [""])[0] == "1"
+    distress_only = query.get("distress", [""])[0] == "1"
+    sort = query.get("sort", ["relevance"])[0]
+    if sort not in ("relevance", "popular", "price_asc", "price_desc", "discount_desc"):
+        sort = "relevance"
+    has_catalog_filters = any((search, city, district, rooms, max_price, developer_only, distress_only, sort != "relevance"))
     cities, districts_by_city, rooms_options = app_filter_options()
     if city and city not in districts_by_city:
         city = ""
@@ -3566,25 +3818,43 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     if district:
         where.append("district = ?")
         params.append(district)
+    if developer_only:
+        where.append("listing_type = 'developer'")
+    if distress_only:
+        where.append("distress = 1")
     if rooms:
-        where.append("listing_type != 'developer' and rooms = ?")
+        unit = {label.lower(): key for key, label in UNIT_TYPES}.get(rooms.lower())
+        if unit:
+            where.append(f"((listing_type != 'developer' and rooms = ?) or (listing_type='developer' and {unit}_price_aed > 0))")
+        else:
+            where.append("(listing_type != 'developer' and rooms = ?)")
         params.append(rooms)
+    selected_unit = {label.lower(): key for key, label in UNIT_TYPES}.get(rooms.lower())
+    price_expression = f"case when listing_type='developer' then {selected_unit}_price_aed else price end" if selected_unit else "price"
     if max_price:
         try:
-            max_price_value = float(max_price.replace(" ", "").replace(",", "."))
-            where.append("listing_type != 'developer' and price <= ?")
+            max_price_value = positive_number(max_price, "Budget")
+            if currency == "USD":
+                max_price_value *= AED_PER_USD
+            where.append(f"({price_expression} > 0 and {price_expression} <= ?)")
             params.append(max_price_value)
-        except ValueError:
+        except (TypeError, ValueError):
             pass
+    # Popularity counts real detail views and explicit bot interest, not automated sends.
+    popularity = "(select count(*) from catalog_events ce where ce.project_id=projects.id and ce.event_type='catalog_lot_view') + (select count(*) from bot_events e where e.project_id=projects.id and e.event_type='click_interest')"
+    discount = discount_sql()
+    order = {"discount_desc": f"({discount} is null), {discount} desc, updated_at desc, id desc",
+             "popular": f"({popularity}) desc, updated_at desc, id desc",
+             "price_asc": f"({price_expression} <= 0 or {price_expression} is null), {price_expression} asc, id desc",
+             "price_desc": f"({price_expression} <= 0 or {price_expression} is null), {price_expression} desc, id desc"}.get(sort)
+    if not order:
+        # Exact title/project matches, then prefix matches, then other matching fields.
+        order = "updated_at desc, id desc"
+        if search:
+            order = "case when lower(title)=lower(?) or lower(project_name)=lower(?) then 0 when title like ? or project_name like ? then 1 else 2 end, " + order
+            params.extend([search, search, search + "%", search + "%"])
     with db() as conn:
-        projects = conn.execute(
-            f"""
-            select * from projects
-            where {' and '.join(where)}
-            order by random()
-            """,
-            params,
-        ).fetchall()
+        projects = conn.execute(f"select * from projects where {' and '.join(where)} order by {order}", params).fetchall()
     city_options = f'<option value="">{"All cities" if lang == "en" else "Все города"}</option>' + "".join(
         f'<option value="{escape(item)}"{" selected" if item == city else ""}>{escape(item)}</option>'
         for item in cities
@@ -3693,9 +3963,22 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
       <select name="city">{city_options}</select>
       <select name="district">{district_options}</select>
       <select name="rooms">{rooms_select}</select>
-      <input name="max_price" value="{escape(max_price)}" inputmode="numeric" placeholder="{escape(max_price_placeholder)}">
+      <input name="max_price" value="{escape(max_price)}" inputmode="decimal" placeholder="{escape(max_price_placeholder)}">
+      <input type="hidden" name="currency" value="{currency}">
+      <input type="hidden" name="lang" value="{lang}">
       <button>{escape(find_label)}</button>
       <a class="app-button secondary" href="{escape(root_path)}">{escape(reset_label)}</a>
+      <div class="catalog-flags">
+        <label class="developer-filter"><input type="checkbox" name="developer" value="1" {'checked' if developer_only else ''}> {'From developer' if lang == 'en' else 'От застройщика'}</label>
+        <label class="developer-filter"><input type="checkbox" name="distress" value="1" {'checked' if distress_only else ''}> {'Distress only' if lang == 'en' else 'Только дистресс'}</label>
+      </div>
+      <fieldset class="catalog-sort">
+        <legend>{'Sort by' if lang == 'en' else 'Сортировка'}</legend>
+        <div class="sort-options">
+          {''.join(f'<label class="sort-choice"><input type="radio" name="sort" value="{key}" {"checked" if sort == key else ""}><span>{label}</span></label>' for key, label in [('relevance', 'Relevance' if lang == 'en' else 'По релевантности'), ('popular', 'Popularity' if lang == 'en' else 'По популярности'), ('price_asc', 'Price ↑' if lang == 'en' else 'Цена ↑'), ('price_desc', 'Price ↓' if lang == 'en' else 'Цена ↓'), ('discount_desc', 'Market discount' if lang == 'en' else 'По скидке к рынку')])}
+        </div>
+        {f'<small>{"Largest percentage below market first; properties without comparison data last." if lang == "en" else "Сначала наибольший процент ниже рынка; объекты без данных для сравнения — в конце."}</small>' if sort == 'discount_desc' else ''}
+      </fieldset>
     </form>
     {f'<section class="lot-grid">{cards}</section>' if cards else f'<div class="empty-state">{escape(empty_text)}</div>'}
     {subscription_popup}
@@ -3703,6 +3986,9 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     (function() {{
       var form = document.getElementById('catalog-filters');
       if (!form) return;
+      form.querySelectorAll('input[name="sort"], input[name="developer"], input[name="distress"]').forEach(function(input) {{
+        input.addEventListener('change', function() {{ form.requestSubmit(); }});
+      }});
       var citySelect = form.elements.city;
       var districtSelect = form.elements.district;
       var districtsByCity = {district_map_json};
@@ -3738,12 +4024,12 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
     photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
     href = f"{lot_path}?id={project['id']}" if lot_path else lot_public_path(project, lang)
     developer = is_developer_project(project)
-    developer_badge = '<span class="developer-badge">🏗 ' + ('FROM DEVELOPER' if lang == 'en' else 'ОТ ЗАСТРОЙЩИКА') + '</span>' if developer else ''
+    developer_badge = '<span class="developer-badge">' + ('From developer' if lang == 'en' else 'От застройщика') + '</span>' if developer else ''
     min_price = developer_min_price(project) if developer else None
-    price_text = (f"{'From' if lang == 'en' else 'От'} ${money(min_price)}" if min_price else ("Price on request" if lang == "en" else "Цена по запросу")) if developer else f"{money(project['price'])} AED"
+    price_text = (f"{'From' if lang == 'en' else 'От'} {format_price(min_price)}" if min_price else ("Price on request" if lang == "en" else "Цена по запросу")) if developer else f"{money(project['price'])} AED"
     location_title = project["developer_name"] if developer else project["building"]
     meta_items = (
-        [localized_project_value(project["category"], lang), project["handover"]]
+        [localized_project_value(project["category"], lang), project_text(project, "handover", lang)]
         if developer
         else [localized_project_value(project["category"], lang), localized_project_value(project["rooms"], lang), project["area"]]
     )
@@ -3765,7 +4051,7 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
 
 def app_deal_tags(project, lang="ru"):
     tags = []
-    market_discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+    market_discount = project_discount(project)
     original_discount = pct_below(project["price"], project["original_price"]) if project["original_price"] else None
     if market_discount and market_discount > 0:
         label = f"{market_discount}% below market" if lang == "en" else f"Ниже рынка на {market_discount}%"
@@ -4019,18 +4305,32 @@ def app_developer_project_page(project, message="", base_path="/app", lang="ru")
         (labels["project"], project["project_name"]),
         (labels["furnishing"], localized_project_value(project["furnishing"], lang)),
     ]
-    for unit_type, price in developer_price_rows(project):
-        if price not in (None, ""):
-            label = f"Minimum {unit_type} price" if lang == "en" else f"Мин. цена {unit_type}"
-            facts.append((label, f"${money(price)}"))
-    facts.extend([(labels["payment"], project["payment_plan"]), (labels["handover"], project["handover"])])
+    for unit, unit_type in UNIT_TYPES:
+        price = project[unit + "_price_aed"]
+        maximum = project[unit + "_max_price_aed"]
+        if price:
+            label = f"{unit_type} price" if lang == "en" else f"Цена {unit_type}"
+            value = format_price(price)
+            if maximum:
+                value += " – " + format_price(maximum)
+                if project[unit + "_max_estimated"]:
+                    value += " (estimated upper price)" if lang == "en" else " (верхняя цена — оценка)"
+            facts.append((label, value))
+        if project[unit + "_area"]:
+            facts.append((f"{unit_type} · " + ("Area" if lang == "en" else "Площадь"), localized_project_value(project[unit + "_area"], lang)))
+    if project["market_price"]:
+        facts.append(("Average market price" if lang == "en" else "Средняя цена рынка", format_price(project["market_price"])))
+    discount = project_discount(project)
+    if discount and discount > 0:
+        facts.append(("Below market" if lang == "en" else "Ниже рынка", f"{discount:g}%"))
+    facts.extend([(labels["payment"], project_text(project, "payment_plan", lang)), (labels["handover"], project_text(project, "handover", lang))])
     fact_html = "".join(
         f'<div class="fact"><small>{escape(label)}</small>{escape(value)}</div>'
         for label, value in facts if value not in (None, "")
     )
     min_price = developer_min_price(project)
     price_text = (
-        (f"From ${money(min_price)}" if lang == "en" else f"От ${money(min_price)}")
+        (f"From {format_price(min_price)}" if lang == "en" else f"От {format_price(min_price)}")
         if min_price else ("Price on request" if lang == "en" else "Цена по запросу")
     )
     back_label = "All properties" if lang == "en" else "Вся недвижимость"
@@ -4040,8 +4340,7 @@ def app_developer_project_page(project, message="", base_path="/app", lang="ru")
     name_placeholder = "Your name" if lang == "en" else "Ваше имя"
     contact_placeholder = "Phone, WhatsApp, or Telegram" if lang == "en" else "Телефон, WhatsApp или Telegram"
     comment_placeholder = "Comment" if lang == "en" else "Комментарий"
-    raw_comment = str(project["developer_comment"] or "").strip()
-    visible_comment = "" if lang == "en" and re.search(r"[А-Яа-яЁё]", raw_comment) else raw_comment
+    visible_comment = project_text(project, "developer_comment", lang)
     language_switch = ""
     alternates = {}
     if is_public_catalog:
@@ -4070,14 +4369,14 @@ def app_developer_project_page(project, message="", base_path="/app", lang="ru")
     <section class="lot-detail">
       <div class="gallery">{''.join(gallery_items) or f'<div class="gallery-item">{escape(photo_placeholder)}</div>'}</div>
       <aside class="detail-panel">
-        <div class="developer-badge">🏗 {'FROM DEVELOPER' if lang == 'en' else 'ОТ ЗАСТРОЙЩИКА'}</div>
+        <div class="developer-badge">{'From developer' if lang == 'en' else 'От застройщика'}</div>
         <h1>{escape(display_name)}</h1>
         <div class="detail-price">{escape(price_text)}</div>
         <div class="facts">{fact_html}</div>
         {f'<p>{escape(visible_comment)}</p>' if visible_comment else ''}
         <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ {escape(share_label)}</button>
         <form class="lead-form" method="post" action="{escape(lead_path)}">
-          <input type="hidden" name="project_id" value="{project['id']}"><input type="hidden" name="tg_user_json" value=""><input type="hidden" name="catalog_session_id" value=""><input type="hidden" name="traffic_attribution" value="">
+          <input type="hidden" name="lang" value="{lang}"><input type="hidden" name="project_id" value="{project['id']}"><input type="hidden" name="tg_user_json" value=""><input type="hidden" name="catalog_session_id" value=""><input type="hidden" name="traffic_attribution" value="">
           <input name="name" placeholder="{escape(name_placeholder)}"><input name="contact" required placeholder="{escape(contact_placeholder)}"><textarea name="message" placeholder="{escape(comment_placeholder)}"></textarea>
           <button>💬 {escape(details_label)}</button>
         </form>
@@ -4094,7 +4393,7 @@ def app_developer_project_page(project, message="", base_path="/app", lang="ru")
     property_entity = {
         "@type": "Accommodation", "name": display_name, "description": description,
         "address": {"@type": "PostalAddress", "addressLocality": project["city"], "addressRegion": project["district"], "addressCountry": "AE"},
-        "offers": {"@type": "AggregateOffer", "lowPrice": str(min_price or 0), "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": canonical_url},
+        "offers": {"@type": "AggregateOffer", "lowPrice": str(min_price or 0), "priceCurrency": "AED", "availability": "https://schema.org/InStock", "url": canonical_url},
     }
     structured_data = [{
         "@context": "https://schema.org", "@type": "RealEstateListing", "@id": f"{canonical_url}#listing", "url": canonical_url,
@@ -4172,7 +4471,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         (labels["status"], localized_project_value(project["availability"], lang)),
         (labels["furnishing"], localized_project_value(project["furnishing"], lang)),
         (labels["balcony"], localized_project_value(project["balcony"], lang)),
-        (labels["area"], project["area"]),
+        (labels["area"], localized_project_value(project["area"], lang)),
     ]
     fact_html = "".join(
         f'<div class="fact"><small>{escape(label)}</small>{escape(value)}</div>'
@@ -4180,11 +4479,13 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         if value not in (None, "")
     )
     if project["market_price"]:
-        discount = pct_below(project["price"], project["market_price"])
+        discount = project_discount(project)
         fact_html += f'<div class="fact"><small>{escape(labels["market_price"])}</small>{money(project["market_price"])} AED</div>'
         if discount and discount > 0:
             value = f"{discount}% below" if lang == "en" else f"на {discount}%"
             fact_html += f'<div class="fact deal-tag"><small>{escape(labels["below_market"])}</small>{escape(value)}</div>'
+    if not project["market_price"] and project_discount(project):
+        fact_html += f'<div class="fact deal-tag"><small>{escape(labels["below_market"])}</small>{project_discount(project):g}%</div>'
     if project["distress"]:
         fact_html += f'<div class="fact distress-tag"><small>{escape(labels["distress"])}</small>{escape(labels["special_offer"])}</div>'
         if project["original_price"]:
@@ -4224,11 +4525,10 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         ).fetchall()
     related_cards = "".join(app_project_card(item, None, lang=lang) for item in related_projects)
     related_heading = "Similar below-market properties" if lang == "en" else "Похожие лоты ниже рынка"
-    discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+    discount = project_discount(project)
     availability = localized_project_value(project["availability"], lang)
     floor_level = localized_project_value(project["floor_level"], lang)
-    raw_description = str(project["description"] or "").strip()
-    visible_description = "" if lang == "en" and re.search(r"[А-Яа-яЁё]", raw_description) else raw_description
+    visible_description = project_text(project, "description", lang)
     if lang == "en":
         market_sentence = (
             f"The asking price is {discount}% below the stated average market price of {money(project['market_price'])} AED."
@@ -4276,7 +4576,7 @@ def app_project_page(project_id, message="", base_path="/app", lang="ru"):
         {f'<p>{escape(visible_description)}</p>' if visible_description else ''}
         <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ {escape(share_label)}</button>
         <form class="lead-form" method="post" action="{escape(lead_path)}">
-          <input type="hidden" name="project_id" value="{project['id']}">
+          <input type="hidden" name="lang" value="{lang}"><input type="hidden" name="project_id" value="{project['id']}">
           <input type="hidden" name="tg_user_json" value="">
           <input type="hidden" name="catalog_session_id" value="">
           <input type="hidden" name="traffic_attribution" value="">
@@ -5748,7 +6048,7 @@ def llms_txt():
             project["area"],
             f"{money(project['price'])} AED",
         ]
-        discount = pct_below(project["price"], project["market_price"]) if project["market_price"] else None
+        discount = project_discount(project)
         if discount and discount > 0:
             details.append(f"{discount}% below market")
         if project["distress"]:
@@ -6425,7 +6725,7 @@ form.inline { display:inline; }
 .lot-type-fields[hidden] { display:none; }
 .lot-type-fields { margin-top:20px; }
 .lot-type-fields h2 { margin:0 0 14px; }
-.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:100%; padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:900; text-transform:uppercase; }
+.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:100%; padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:700; letter-spacing:.01em; }
 label { display:grid; gap:6px; color:var(--muted); font-weight:700; font-size:12px; }
 input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:10px 11px; background:#fff; color:var(--text); font:inherit; }
 textarea { min-height:110px; resize:vertical; }
@@ -6519,7 +6819,7 @@ a { color:inherit; }
 .app-brand { font-size:13px; color:var(--gold); font-weight:800; text-transform:uppercase; letter-spacing:.8px; }
 .app-hero h1 { margin:0; font-size:clamp(28px,5vw,44px); line-height:1.06; letter-spacing:0; max-width:780px; }
 .app-hero p { margin:0; max-width:680px; color:var(--muted); font-size:16px; }
-.app-filters { position:sticky; top:0; z-index:2; display:grid; grid-template-columns:1.2fr repeat(4,1fr) auto auto; gap:10px; padding:12px; margin:10px 0 18px; background:rgba(244,245,242,.92); backdrop-filter:blur(10px); border:1px solid var(--line); border-radius:8px; }
+.app-filters { position:sticky; top:0; z-index:2; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; padding:12px; margin:10px 0 18px; background:rgba(244,245,242,.92); backdrop-filter:blur(10px); border:1px solid var(--line); border-radius:8px; }
 input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:11px 12px; background:#fff; color:var(--text); font:inherit; }
 button, .app-button { border:0; border-radius:7px; padding:11px 14px; background:var(--accent); color:#fff; font-weight:800; text-decoration:none; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
 .app-button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
@@ -6527,7 +6827,31 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .lot-card { display:grid; overflow:hidden; background:var(--card); border:1px solid var(--line); border-radius:8px; text-decoration:none; min-height:100%; }
 .lot-cover { position:relative; aspect-ratio:4/3; background:#e7ebe7; overflow:hidden; display:grid; place-items:center; color:var(--muted); }
 .lot-cover img { width:100%; height:100%; object-fit:cover; display:block; }
-.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:calc(100% - 24px); padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:900; text-transform:uppercase; }
+.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:calc(100% - 24px); padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:700; letter-spacing:.01em; }
+.catalog-preferences { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.catalog-preferences.standalone { justify-content:flex-end; margin-bottom:14px; }
+.currency-switch { display:inline-flex; gap:2px; padding:4px; border:1px solid var(--line); border-radius:999px; background:#fff; }
+.currency-switch button { min-width:48px; padding:7px 10px; border-radius:999px; background:transparent; color:var(--muted); font-size:13px; font-weight:750; line-height:1.3; transition:background .15s,color .15s; }
+.currency-switch button[aria-pressed="true"] { background:var(--accent); color:#fff; }
+.currency-switch button:hover:not([aria-pressed="true"]) { background:#eef2ee; color:var(--text); }
+.currency-switch button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.catalog-preferences .language-switch { font-size:13px; }
+.catalog-preferences .language-switch a, .catalog-preferences .language-switch span { padding:7px 9px; line-height:1.3; }
+.app-filters select, .app-filters input { min-width:0; }
+.app-filters input[name="q"] { grid-column:span 2; }
+.developer-filter { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+.developer-filter input { width:auto; accent-color:var(--accent); }
+.catalog-flags { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:12px 24px; padding:6px 0; }
+.catalog-sort { grid-column:1 / -1; margin:4px 0 0; padding:10px 0 0; border:0; border-top:1px solid var(--line); min-width:0; }
+.catalog-sort legend { float:left; margin:8px 14px 8px 0; color:var(--muted); font-size:13px; font-weight:700; }
+.sort-options { display:flex; flex-wrap:wrap; gap:6px; }
+.sort-choice { position:relative; cursor:pointer; }
+.sort-choice input[type="radio"] { position:absolute; opacity:0; width:1px; height:1px; padding:0; }
+.sort-choice span { display:block; padding:8px 12px; border:1px solid transparent; border-radius:7px; font-size:13px; color:var(--muted); background:transparent; }
+.sort-choice input:checked + span { border-color:#c9d8ce; background:#e5eee7; color:var(--accent); font-weight:750; }
+.sort-choice:hover span { background:#eaf0eb; color:var(--text); }
+.sort-choice input:focus-visible + span { outline:2px solid var(--accent); outline-offset:2px; }
+.catalog-sort small { display:block; clear:both; padding-top:8px; color:var(--muted); }
 .lot-cover .developer-badge { position:absolute; z-index:1; top:10px; left:10px; box-shadow:0 2px 8px rgba(23,34,29,.2); }
 .lot-body { padding:13px; display:grid; gap:8px; }
 .lot-title { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; font-weight:850; font-size:16px; }
@@ -6633,7 +6957,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .article-lead-form small { color:var(--muted); }
 @media (max-width:900px) { .app-shell { padding:14px 12px 36px; } .app-filters { position:static; grid-template-columns:1fr 1fr; } .app-filters input:first-child { grid-column:1 / -1; } .lot-grid { grid-template-columns:1fr; } .lot-detail { grid-template-columns:1fr; } .detail-panel { position:static; } }
 @media (max-width:900px) { .seo-grid, .seo-columns, .seo-table, .broker-card dl, .blog-grid, .article-layout, .article-lead { grid-template-columns:1fr; } .seo-hero p { font-size:16px; } .article-author { position:static; } }
-@media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
+@media (max-width:520px) { .app-filters { grid-template-columns:1fr; } .app-filters input[name="q"] { grid-column:1; } .facts { grid-template-columns:1fr; } .gallery { grid-template-columns:1fr; } .seo-actions { display:grid; } .seo-topbar { align-items:flex-start; flex-direction:column; } }
 @media (max-width:520px) { .public-footer { flex-direction:column; } .public-footer nav { justify-content:flex-start; flex-direction:column; } }
 @media (max-width:680px) { .bot-subscribe { grid-template-columns:1fr; gap:12px; padding:16px 48px 16px 16px; } .bot-subscribe-action { width:100%; white-space:normal; } }
 """
@@ -6659,11 +6983,11 @@ def dashboard(message=""):
     rows = []
     for p in projects:
         developer = is_developer_project(p)
-        badge = '<span class="developer-badge">🏗 ОТ ЗАСТРОЙЩИКА</span><br>' if developer else ""
+        badge = '<span class="developer-badge">От застройщика</span><br>' if developer else ""
         location_name = p["developer_name"] if developer else p["building"]
         units = "Несколько типов" if developer else p["rooms"]
         min_price = developer_min_price(p) if developer else None
-        price = (f"От ${money(min_price)}" if min_price else "По запросу") if developer else f"{money(p['price'])} AED"
+        price = (f"От {format_price(min_price)}" if min_price else "По запросу") if developer else f"{money(p['price'])} AED"
         rows.append(f"""
         <tr>
           <td>{badge}<strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['city'])}, {escape(p['district'])}, {escape(location_name)}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
@@ -7607,9 +7931,22 @@ def build_subscriber_statistics_xlsx(period):
 
 def project_form(project=None, message=""):
     p = dict(project) if project else {}
-    action = "/project/update" if project else "/project/create"
-    hidden = f'<input type="hidden" name="id" value="{project["id"]}">' if project else ""
+    action = "/project/update" if p.get("id") else "/project/create"
+    hidden = f'<input type="hidden" name="id" value="{p["id"]}">' if p.get("id") else ""
     listing_type = p.get("listing_type") or "resale"
+    unit_fields = ""
+    suggestions = {}
+    for unit, label in UNIT_TYPES:
+        delta, sample_count = max_price_suggestion(unit, p.get("id"))
+        suggestions[unit] = delta
+        evidence = f"Средняя разница по {sample_count} подтверждённым диапазонам" if sample_count else "Предварительная оценка: стартовая цена + 100 000 AED; статистики пока недостаточно"
+        unit_fields += f'''<fieldset class="wide unit-prices" data-unit="{unit}"><legend>{label}</legend><div class="form-grid">
+          <label>Стартовая цена, AED<input type="number" min="0.01" step="0.01" name="{unit}_price_aed" value="{escape(p.get(unit + '_price_aed'))}"></label>
+          <label>Максимальная цена, AED<input type="number" min="0.01" step="0.01" name="{unit}_max_price_aed" value="{escape(p.get(unit + '_max_price_aed'))}"></label>
+          <input type="hidden" name="{unit}_max_estimated" value="{int(p.get(unit + '_max_estimated', 1))}">
+          <label>Площадь (необязательно)<input name="{unit}_area" value="{escape(p.get(unit + '_area'))}" placeholder="Например: 850 sqft / 79 м²"></label>
+          </div><small>{evidence}. Можно изменить вручную.</small>
+          <button type="button" class="secondary suggest-price">Предложить максимум</button></fieldset>'''
     content = f"""
     <form class="panel" id="project-form" method="post" action="{action}" enctype="multipart/form-data">
       {hidden}
@@ -7642,25 +7979,30 @@ def project_form(project=None, message=""):
           <label>Original price, AED<input type="number" step="1" name="original_price" value="{escape(p.get('original_price'))}"></label>
           <label>Distress<select name="distress"><option value="0" {selected(str(p.get('distress',0)),'0')}>Нет</option><option value="1" {selected(str(p.get('distress',0)),'1')}>Да</option></select></label>
           <label class="wide">От кого<input name="source_from" value="{escape(p.get('source_from'))}" placeholder="Например: агент, собственник, партнёр"></label>
-          <label class="wide">Дополнительное описание<textarea name="description">{escape(p.get('description'))}</textarea></label>
+          <label>Ниже рынка, % (необязательно)<input type="number" min="0" max="100" step="0.1" name="below_market_pct" value="{escape(p.get('below_market_pct'))}"></label>
+          <label class="wide">Комментарий / описание (русский)<textarea name="description">{escape(p.get('description'))}</textarea></label>
+          <label class="wide">Комментарий / описание (English)<textarea name="description_en">{escape(p.get('description_en'))}</textarea></label>
         </div>
       </div>
       <div class="lot-type-fields" data-listing-fields="developer">
-        <h2><span class="developer-badge">🏗 От застройщика</span></h2>
+        <h2><span class="developer-badge">От застройщика</span></h2>
         <div class="form-grid">
           <label>Категория<select name="category" required><option value="Apartment" {selected(p.get('category'),'Apartment')}>Апартаменты</option><option value="Villa" {selected(p.get('category'),'Villa')}>Вилла</option><option value="Townhouse" {selected(p.get('category'),'Townhouse')}>Таунхаус</option></select></label>
           <label>Город<input name="city" required value="{escape(p.get('city') or 'Dubai')}" placeholder="Dubai"></label>
           <label>Район<input name="district" required value="{escape(p.get('district'))}"></label>
           <label>Застройщик<input name="developer_name" required value="{escape(p.get('developer_name'))}"></label>
           <label>Название проекта<input name="project_name" required value="{escape(p.get('project_name') or (p.get('title') if listing_type == 'developer' else ''))}"></label>
-          <label>Мебировка<input name="furnishing" value="{escape(p.get('furnishing'))}" placeholder="Furnished / Unfurnished"></label>
-          <label>Минимальная цена студии, $<input type="number" min="0" step="1" name="studio_price_usd" value="{escape(p.get('studio_price_usd'))}"></label>
-          <label>Минимальная цена 1BR, $<input type="number" min="0" step="1" name="one_bed_price_usd" value="{escape(p.get('one_bed_price_usd'))}"></label>
-          <label>Минимальная цена 2BR, $<input type="number" min="0" step="1" name="two_bed_price_usd" value="{escape(p.get('two_bed_price_usd'))}"></label>
-          <label>Минимальная цена 3BR, $<input type="number" min="0" step="1" name="three_bed_price_usd" value="{escape(p.get('three_bed_price_usd'))}"></label>
+          <label>Меблировка<input name="furnishing" value="{escape(p.get('furnishing'))}" placeholder="Furnished / Unfurnished"></label>
+          {unit_fields}
           <label class="wide">Рассрочка<input name="payment_plan" value="{escape(p.get('payment_plan'))}" placeholder="Например: 20/50/30"></label>
           <label>Ключи (квартал-год)<input name="handover" value="{escape(p.get('handover'))}" placeholder="Q4 2028"></label>
-          <label class="wide">Комментарий<textarea name="developer_comment">{escape(p.get('developer_comment'))}</textarea></label>
+          <label>Средняя цена рынка, AED (необязательно)<input type="number" min="0.01" step="0.01" name="market_price" value="{escape(p.get('market_price'))}"></label>
+          <label>Ниже рынка, % (необязательно)<input type="number" min="0" max="100" step="0.1" name="below_market_pct" value="{escape(p.get('below_market_pct'))}"></label>
+          <label>Дистресс<select name="distress"><option value="0" {selected(str(p.get('distress',0)),'0')}>Нет</option><option value="1" {selected(str(p.get('distress',0)),'1')}>Да</option></select></label>
+          <label class="wide">Комментарий (русский)<textarea name="developer_comment" required>{escape(p.get('developer_comment'))}</textarea></label>
+          <label class="wide">Комментарий (English)<textarea name="developer_comment_en" required>{escape(p.get('developer_comment_en'))}</textarea></label>
+          <label>Рассрочка (English, если описание на русском)<input name="payment_plan_en" value="{escape(p.get('payment_plan_en'))}"></label>
+          <label>Срок сдачи (English, если описание на русском)<input name="handover_en" value="{escape(p.get('handover_en'))}"></label>
         </div>
       </div>
       <div class="form-grid">
@@ -7681,12 +8023,27 @@ def project_form(project=None, message=""):
         var media = document.querySelector('input[name="media"]');
         if (media) media.multiple = type.value !== 'developer';
       }}
+      var suggestions = {json.dumps(suggestions)};
+      document.querySelectorAll('[data-unit]').forEach(function(group) {{
+        var unit = group.dataset.unit;
+        var start = group.querySelector('[name="' + unit + '_price_aed"]');
+        var max = group.querySelector('[name="' + unit + '_max_price_aed"]');
+        var estimated = group.querySelector('[name="' + unit + '_max_estimated"]');
+        function suggest() {{
+          if (Number(start.value) > 0) {{ max.value = (Number(start.value) + suggestions[unit]).toFixed(2); estimated.value = '1'; }}
+          else if (estimated.value === '1') {{ max.value = ''; }}
+        }}
+        start.addEventListener('input', function() {{ if (!max.value || estimated.value === '1') suggest(); }});
+        max.addEventListener('input', function() {{ estimated.value = max.value ? '0' : '1'; }});
+        group.querySelector('.suggest-price').addEventListener('click', suggest);
+        if (start.value && !max.value) suggest();
+      }});
       type.addEventListener('change', syncFields);
       syncFields();
     }})();
     </script>
     """
-    if project:
+    if p.get("id"):
         media = get_project_media(project["id"])
         image_options = "".join(
             f"""
@@ -8372,7 +8729,8 @@ def broadcasts_page(message=""):
     <form class="panel" method="post" action="/broadcast/custom" enctype="multipart/form-data">
       <h2>Свободная рассылка</h2>
       <div class="form-grid">
-        <label class="wide">Текст рассылки<textarea name="text" required placeholder="Напишите сообщение для подписчиков"></textarea></label>
+        <label class="wide">Текст рассылки (русский)<textarea name="text" required placeholder="Напишите сообщение для подписчиков"></textarea></label>
+        <label class="wide">Текст рассылки (English)<textarea name="text_en" required placeholder="English version for English-speaking subscribers"></textarea></label>
         <label class="wide">Фото/видео<input type="file" name="media" multiple accept="image/*,video/*"></label>
         <label>Дата и время отправки<input type="datetime-local" name="send_at"></label>
       </div>
@@ -8441,7 +8799,8 @@ def subscribers_page(message=""):
               <option value="has_lot_leads">Оставляли заявку по лоту</option>
               <option value="has_personal_leads">Оставляли персональный подбор</option>
             </select></label>
-            <label class="wide">Сообщение<textarea name="text" required placeholder="Напишите сообщение, оно придёт пользователям в бот"></textarea></label>
+            <label class="wide">Сообщение (русский)<textarea name="text" required placeholder="Напишите сообщение, оно придёт пользователям в бот"></textarea></label>
+            <label class="wide">Сообщение (English)<textarea name="text_en" required></textarea></label>
           </div>
           <p><button>Отправить сегменту</button></p>
         </form>
@@ -8642,6 +9001,18 @@ def login_page(message=""):
 <body class="login"><form method="post" action="/login"><h1>Realty Bot</h1>{f'<div class="notice">{escape(message)}</div>' if message else ''}<label>Логин<input name="username" autocomplete="username"></label><label>Пароль<input name="password" type="password" autocomplete="current-password"></label><button>Войти</button></form></body></html>"""
 
 
+def positive_number(value, label, allow_zero=False):
+    if value in (None, ""):
+        return None
+    try:
+        result = float(str(value).replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}: укажите число.")
+    if not math.isfinite(result) or result < 0 or (result == 0 and not allow_zero):
+        raise ValueError(f"{label}: укажите положительное число.")
+    return result
+
+
 def save_project(form, project_id=None):
     listing_type = form_value(form, "listing_type", "resale")
     if listing_type == "developer":
@@ -8663,7 +9034,7 @@ def save_project(form, project_id=None):
             "area": "По запросу",
             "price": 0,
             "market_price": None,
-            "distress": 0,
+            "distress": int(form_value(form, "distress", "0") or 0),
             "original_price": None,
             "source_from": "",
             "description": "",
@@ -8678,11 +9049,22 @@ def save_project(form, project_id=None):
             "developer_comment": form_value(form, "developer_comment"),
             "updated_at": iso_now(),
         }
-        prices = [
-            values["studio_price_usd"], values["one_bed_price_usd"],
-            values["two_bed_price_usd"], values["three_bed_price_usd"],
-        ]
-        numeric_prices = [float(value) for value in prices if value not in (None, "")]
+        for unit, _ in UNIT_TYPES:
+            start = positive_number(form_value(form, unit + "_price_aed"), unit + " start")
+            maximum = positive_number(form_value(form, unit + "_max_price_aed"), unit + " maximum")
+            estimated = form_value(form, unit + "_max_estimated", "1") != "0"
+            area = form_value(form, unit + "_area").strip()
+            if not start and (maximum or area):
+                raise ValueError("Укажите стартовую цену для конфигурации с площадью или максимальной ценой.")
+            if start and maximum is None:
+                maximum = start + max_price_suggestion(unit, project_id)[0]
+                estimated = True
+            if maximum is not None and maximum < start:
+                raise ValueError("Максимальная цена не может быть ниже стартовой.")
+            values.update({unit + "_price_aed": start, unit + "_max_price_aed": maximum,
+                           unit + "_max_estimated": int(estimated), unit + "_area": area,
+                           unit + "_price_usd": None})
+        numeric_prices = [values[unit + "_price_aed"] for unit, _ in UNIT_TYPES if values[unit + "_price_aed"]]
         values["price"] = min(numeric_prices) if numeric_prices else 0
     else:
         values = {
@@ -8717,44 +9099,35 @@ def save_project(form, project_id=None):
             "developer_comment": None,
             "updated_at": iso_now(),
         }
+    values["original_price"] = positive_number(values.get("original_price"), "Original price")
+    values["market_price"] = positive_number(form_value(form, "market_price"), "Средняя цена рынка")
+    pct = form_value(form, "below_market_pct").strip()
+    values["below_market_pct"] = positive_number(pct, "Ниже рынка, %", allow_zero=True)
+    if values["below_market_pct"] is not None and values["below_market_pct"] > 100:
+        raise ValueError("Процент ниже рынка должен быть от 0 до 100.")
+    for field in ("developer_comment", "description", "payment_plan", "handover"):
+        values[field + "_en"] = form_value(form, field + "_en").strip()
+        original = str(values.get(field) or "").strip()
+        if re.search(r"[А-Яа-яЁё]", original) and not values[field + "_en"]:
+            raise ValueError("Добавьте английский перевод: " + {"developer_comment": "комментарий", "description": "описание", "payment_plan": "рассрочка", "handover": "срок сдачи"}[field])
+        if re.search(r"[А-Яа-яЁё]", values[field + "_en"]):
+            raise ValueError("В английском переводе не должно быть русского текста.")
+    if listing_type == "developer" and (not values["developer_comment"].strip() or not values["developer_comment_en"]):
+        raise ValueError("Добавьте комментарий к проекту на русском и английском.")
+    if listing_type != "developer":
+        values["price"] = positive_number(values["price"], "Цена")
+        if values["price"] is None:
+            raise ValueError("Укажите цену объекта в AED.")
+        for unit, _ in UNIT_TYPES:
+            values.update({unit + "_price_aed": None, unit + "_max_price_aed": None,
+                           unit + "_max_estimated": 1, unit + "_area": None})
     with db() as conn:
         if project_id:
-            values["id"] = project_id
-            conn.execute(
-                """
-                update projects set title=:title, category=:category, city=:city, district=:district, building=:building,
-                  rooms=:rooms, bathrooms=:bathrooms, floor_level=:floor_level, parking=:parking,
-                  availability=:availability, furnishing=:furnishing, balcony=:balcony, area=:area,
-                  price=:price, market_price=:market_price, distress=:distress, original_price=:original_price,
-                  source_from=:source_from, description=:description, listing_type=:listing_type,
-                  developer_name=:developer_name, project_name=:project_name,
-                  studio_price_usd=:studio_price_usd, one_bed_price_usd=:one_bed_price_usd,
-                  two_bed_price_usd=:two_bed_price_usd, three_bed_price_usd=:three_bed_price_usd,
-                  payment_plan=:payment_plan, handover=:handover, developer_comment=:developer_comment,
-                  updated_at=:updated_at
-                where id=:id
-                """,
-                values,
-            )
+            conn.execute("update projects set " + ", ".join(key + "=?" for key in values) + " where id=?", list(values.values()) + [project_id])
             new_id = project_id
         else:
             values["created_at"] = iso_now()
-            cur = conn.execute(
-                """
-                insert into projects(title, category, city, district, building, rooms, bathrooms, floor_level,
-                  parking, availability, furnishing, balcony, area, price, market_price, distress,
-                  original_price, source_from, description, listing_type, developer_name, project_name,
-                  studio_price_usd, one_bed_price_usd, two_bed_price_usd, three_bed_price_usd,
-                  payment_plan, handover, developer_comment, created_at, updated_at)
-                values(:title, :category, :city, :district, :building, :rooms, :bathrooms, :floor_level,
-                  :parking, :availability, :furnishing, :balcony, :area, :price, :market_price,
-                  :distress, :original_price, :source_from, :description, :listing_type,
-                  :developer_name, :project_name, :studio_price_usd, :one_bed_price_usd,
-                  :two_bed_price_usd, :three_bed_price_usd, :payment_plan, :handover,
-                  :developer_comment, :created_at, :updated_at)
-                """,
-                values,
-            )
+            cur = conn.execute("insert into projects (" + ",".join(values) + ") values (" + ",".join("?" for _ in values) + ")", list(values.values()))
             new_id = cur.lastrowid
 
     if isinstance(form, cgi.FieldStorage) and "media" in form:
@@ -9017,13 +9390,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/bot", "/bot/"):
             self.send_html(bot_teaser_page())
         elif path == "/app":
-            self.send_html(app_projects_page(query))
+            self.send_html(app_projects_page(query, lang=query.get("lang", ["ru"])[0]))
         elif path == "/app/lot":
             try:
                 project_id = int(query.get("id", ["0"])[0])
             except ValueError:
                 project_id = 0
-            self.send_html(app_project_page(project_id))
+            self.send_html(app_project_page(project_id, lang=query.get("lang", ["ru"])[0]))
         elif path.startswith("/media/"):
             self.serve_media(path.removeprefix("/media/"), include_body=True)
         elif path.startswith("/assets/"):
@@ -9159,7 +9532,7 @@ class Handler(BaseHTTPRequestHandler):
                     tg_user = json.loads(tg_user_raw)
                 except json.JSONDecodeError:
                     tg_user = None
-            lang = "en" if path == "/en/lead" else "ru"
+            lang = "en" if path == "/en/lead" or (path == "/app/lead" and form_value(form, "lang") == "en") else "ru"
             if not contact:
                 error_message = "Please enter your phone, WhatsApp, or Telegram." if lang == "en" else "Укажите телефон, WhatsApp или Telegram."
                 base_path = "/en" if path == "/en/lead" else ("/ru" if path == "/ru/lead" else ("" if path == "/lead" else "/app"))
@@ -9239,13 +9612,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
 
-        if path == "/project/create":
-            project_id = save_project(parse_form(self))
-            self.redirect(f"/project/edit?id={project_id}")
-        elif path == "/project/update":
+        if path in ("/project/create", "/project/update"):
             form = parse_form(self)
-            project_id = int(form_value(form, "id"))
-            save_project(form, project_id=project_id)
+            project_id = int(form_value(form, "id")) if path.endswith("update") else None
+            try:
+                project_id = save_project(form, project_id=project_id)
+            except ValueError as exc:
+                values = {key: form_value(form, key) for key in form.keys() if key != "media"}
+                if project_id:
+                    values["id"] = project_id
+                self.send_html(project_form(values, str(exc)), status=400)
+                return
             self.redirect(f"/project/edit?id={project_id}")
         elif path == "/project/archive":
             form = parse_form(self)
@@ -9322,6 +9699,9 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = form_value(form, "chat_id")
             text = form_value(form, "text").strip()
             if text and chat_id:
+                if subscriber_preferences(chat_id)[0] == "en" and re.search(r"[А-Яа-яЁё]", text):
+                    self.send_html(chats_page(chat_id, "Клиент выбрал English. Введите ответ на английском."), status=400)
+                    return
                 ok = send_admin_message(chat_id, text)
                 self.send_html(chats_page(chat_id, "Сообщение отправлено" if ok else "Не удалось отправить сообщение"))
             else:
@@ -9333,7 +9713,11 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self.send_html(subscribers_page("Введите текст сообщения"), status=400)
                 return
-            count, total = send_segment_message(segment, text)
+            text_en = form_value(form, "text_en").strip()
+            if not text_en or re.search(r"[А-Яа-яЁё]", text_en):
+                self.send_html(subscribers_page("Добавьте английскую версию сообщения."), status=400)
+                return
+            count, total = send_segment_message(segment, text, text_en)
             self.send_html(subscribers_page(f"Отправлено: {count} из {total}"))
         elif path == "/subscriber/tag":
             form = parse_form(self)
@@ -9546,6 +9930,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/broadcast/custom":
             form = parse_form(self)
             text = form_value(form, "text").strip()
+            text_en = form_value(form, "text_en").strip()
+            if not text_en or re.search(r"[А-Яа-яЁё]", text_en):
+                self.send_html(broadcasts_page("Добавьте текст рассылки на английском языке."), status=400)
+                return
             if not text:
                 self.send_html(broadcasts_page("Введите текст рассылки"), status=400)
                 return
@@ -9560,8 +9948,8 @@ class Handler(BaseHTTPRequestHandler):
                 send_at = None
             with db() as conn:
                 cur = conn.execute(
-                    "insert into custom_broadcasts(text, send_at, status, created_at) values (?, ?, ?, ?)",
-                    (text, send_at, status, iso_now()),
+                    "insert into custom_broadcasts(text, text_en, send_at, status, created_at) values (?, ?, ?, ?, ?)",
+                    (text, text_en, send_at, status, iso_now()),
                 )
                 broadcast_id = cur.lastrowid
             media_items = save_uploaded_files(form, "media", BROADCAST_UPLOAD_DIR, f"broadcast_{broadcast_id}")
@@ -9577,7 +9965,7 @@ class Handler(BaseHTTPRequestHandler):
             if send_at:
                 self.send_html(broadcasts_page("Свободная рассылка запланирована"))
             else:
-                count = send_custom_to_all(broadcast_id, text, media_items)
+                count = send_custom_to_all(broadcast_id, text, media_items, text_en)
                 with db() as conn:
                     conn.execute(
                         "update custom_broadcasts set status='sent', sent_at=?, sent_count=? where id=?",
