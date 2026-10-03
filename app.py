@@ -1587,7 +1587,7 @@ BOT_DESCRIPTIONS = {
 
 
 # Telegram shows both languages before Start, regardless of the app language.
-BOT_DESCRIPTION = BOT_DESCRIPTIONS["en"] + "\n\n" + BOT_DESCRIPTIONS["ru"]
+BOT_DESCRIPTION = "ENGLISH\n\n" + BOT_DESCRIPTIONS["en"] + "\n\n──────────\n\nРУССКИЙ\n\n" + BOT_DESCRIPTIONS["ru"]
 BOT_DESCRIPTIONS = {lang: BOT_DESCRIPTION for lang in ("", "ru", "en")}
 
 def send_welcome_message(chat_id):
@@ -2084,11 +2084,12 @@ def handle_start(chat_id, user, payload="", resume=False):
                 {"code": code, "name": link["name"] if link else "", "source": link["source"] if link else ""}, ensure_ascii=False))
         elif payload == "web_teaser":
             log_event(chat_id, user, "start_web_teaser", payload=payload)
-    if not subscriber_preferences(chat_id)[0]:
+    if not resume or not subscriber_preferences(chat_id)[0]:
         with db() as conn:
-            conn.execute("update subscribers set pending_start=? where chat_id=?", (payload, chat_id))
+            conn.execute("update subscribers set pending_start=?, language=null, state=null, state_project_id=null where chat_id=?", (payload, chat_id))
         language_prompt(chat_id)
         return
+    send_welcome_message(chat_id)
     if payload.startswith("lot_"):
         try:
             project_id = int(payload.split("_", 1)[1])
@@ -2101,7 +2102,7 @@ def handle_start(chat_id, user, payload="", resume=False):
         else:
             send_no_projects_message(chat_id)
         return
-    send_welcome_message(chat_id)
+
 
 
 def handle_text(message):

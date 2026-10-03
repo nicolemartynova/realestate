@@ -136,6 +136,19 @@ class CatalogFeaturesTests(unittest.TestCase):
         app.BOT_METRIKA.record_start.assert_called_once_with(101, f'lot_{pid}')
         self.assertIn('lang=en', app.welcome_keyboard(101))
 
+    def test_returning_user_always_chooses_language_before_welcome(self):
+        for previous, chosen in [('en', 'ru'), ('ru', 'en')]:
+            self.prefs(language=previous)
+            app.telegram_api.reset_mock()
+            app.handle_start(101, self.user)
+            messages = [c.args[1]['text'] for c in app.telegram_api.call_args_list if c.args[0] == 'sendMessage']
+            self.assertEqual(messages, ['Выберите язык / Choose your language'])
+            with patch.object(app, 'configure_subscriber_menu'):
+                app.handle_callback_inner({'id':'q5','data':'lang:'+chosen,'from':self.user,'message':{'chat':{'id':101}}})
+            messages = [c.args[1]['text'] for c in app.telegram_api.call_args_list if c.args[0] == 'sendMessage']
+            self.assertEqual(len(messages), 2)
+            self.assertIn('Я Александр Виноградов' if chosen == 'ru' else 'I’m Alexander Vinogradov', messages[-1])
+
     def test_bot_filters_and_currency(self):
         low = self.create(project_name='Cheap', studio_price_aed='500000')
         high = self.create(project_name='Expensive', studio_price_aed='900000')
