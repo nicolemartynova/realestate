@@ -1586,6 +1586,10 @@ BOT_DESCRIPTIONS = {
 }
 
 
+# Telegram shows both languages before Start, regardless of the app language.
+BOT_DESCRIPTION = BOT_DESCRIPTIONS["en"] + "\n\n" + BOT_DESCRIPTIONS["ru"]
+BOT_DESCRIPTIONS = {lang: BOT_DESCRIPTION for lang in ("", "ru", "en")}
+
 def send_welcome_message(chat_id):
     text = (
         "Я Александр Виноградов, лицензированный брокер в Дубае.\n\n"
