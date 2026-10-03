@@ -25,6 +25,7 @@ from datetime import datetime, time as dt_time, timedelta
 from http import cookies
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from bot_metrika import BotMetrika, parse_yandex_start
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -32,6 +33,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", APP_DIR / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 BROADCAST_UPLOAD_DIR = DATA_DIR / "broadcast_uploads"
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "realty_bot.sqlite3"))
+BOT_METRIKA = BotMetrika(DB_PATH)
 WATERMARK_LOGO_PATH = APP_DIR / "assets" / "watermark-logo.png"
 
 HOST = os.environ.get("HOST", "127.0.0.1")
@@ -450,7 +452,18 @@ def init_db():
         ensure_column(conn, "projects", "source_from", "text")
         ensure_column(conn, "projects", "cover_media_id", "integer")
         ensure_column(conn, "projects", "city", "text not null default 'Dubai'")
+        ensure_column(conn, "projects", "listing_type", "text not null default 'resale'")
+        ensure_column(conn, "projects", "developer_name", "text")
+        ensure_column(conn, "projects", "project_name", "text")
+        ensure_column(conn, "projects", "studio_price_usd", "real")
+        ensure_column(conn, "projects", "one_bed_price_usd", "real")
+        ensure_column(conn, "projects", "two_bed_price_usd", "real")
+        ensure_column(conn, "projects", "three_bed_price_usd", "real")
+        ensure_column(conn, "projects", "payment_plan", "text")
+        ensure_column(conn, "projects", "handover", "text")
+        ensure_column(conn, "projects", "developer_comment", "text")
         conn.execute("update projects set city = 'Dubai' where city is null or trim(city) = ''")
+        conn.execute("update projects set listing_type = 'resale' where listing_type is null or trim(listing_type) = ''")
         ensure_column(conn, "subscribers", "language", "text")
         ensure_column(conn, "subscribers", "filter_rooms", "text")
         ensure_column(conn, "subscribers", "filter_district", "text")
@@ -576,6 +589,30 @@ def money(value):
         return str(value)
 
 
+def is_developer_project(project):
+    return str(project["listing_type"] or "resale") == "developer"
+
+
+def developer_price_rows(project):
+    return [
+        ("Studio", project["studio_price_usd"]),
+        ("1BR", project["one_bed_price_usd"]),
+        ("2BR", project["two_bed_price_usd"]),
+        ("3BR", project["three_bed_price_usd"]),
+    ]
+
+
+def developer_min_price(project):
+    prices = []
+    for _, value in developer_price_rows(project):
+        try:
+            if value not in (None, "") and float(value) > 0:
+                prices.append(float(value))
+        except (TypeError, ValueError):
+            pass
+    return min(prices) if prices else None
+
+
 def pct_below(price, reference):
     try:
         price_f = float(price)
@@ -588,6 +625,32 @@ def pct_below(price, reference):
 
 
 def project_caption(project):
+    if is_developer_project(project):
+        rows = [
+            ("🏷", "Категория", project["category"]),
+            ("🌆", "Город", project["city"]),
+            ("📍", "Район", project["district"]),
+            ("🏗", "Застройщик", project["developer_name"]),
+            ("🏙", "Проект", project["project_name"] or project["title"]),
+            ("🛋", "Меблировка", project["furnishing"]),
+        ]
+        for unit_type, price in developer_price_rows(project):
+            if price not in (None, ""):
+                rows.append(("💰", f"Мин. цена {unit_type}", f"${money(price)}"))
+        rows.extend(
+            [
+                ("🗓", "Рассрочка", project["payment_plan"]),
+                ("🔑", "Ключи", project["handover"]),
+            ]
+        )
+        lines = ["<b>🏗 ОТ ЗАСТРОЙЩИКА</b>", ""]
+        for icon, label, value in rows:
+            if value not in (None, ""):
+                lines.append(f"{icon} <b>{label}:</b> {html.escape(str(value))}")
+        if project["developer_comment"]:
+            lines.extend(["", html.escape(project["developer_comment"])])
+        return "\n".join(lines)
+
     rows = [
         ("🏷", "Категория", project["category"]),
         ("🌆", "Город", project["city"]),
@@ -1813,7 +1876,27 @@ def create_personal_lead_async(chat_id, user, method=None, value=None):
 
 
 def handle_start(chat_id, user, payload=""):
+    diagnostic = re.fullmatch(r"yd_test_ref_([A-Za-z0-9_-]{1,48})", payload)
+    if diagnostic:
+        BOT_METRIKA.record_test_start(chat_id, payload)
+        code = diagnostic.group(1)
+        record_referral_visit(code, chat_id, user, diagnostic=True)
+        log_event(chat_id, user, "start_yandex_test", payload=code)
+        send_welcome_message(chat_id)
+        return
+    BOT_METRIKA.record_start(chat_id, payload)
     upsert_subscriber(user, chat_id)
+    attribution = parse_yandex_start(payload)
+    if attribution:
+        yclid, code = attribution
+        link = record_referral_visit(code or "yandex_direct", chat_id, user, yclid=yclid)
+        log_event(chat_id, user, "start_yandex", payload=json.dumps(
+            {"code": code, "yclid": yclid, "name": link["name"] if link else "",
+             "source": (link["source"] or "Яндекс Директ") if link else "Яндекс Директ"},
+            ensure_ascii=False,
+        ))
+        send_welcome_message(chat_id)
+        return
     if payload.startswith("ref_"):
         code = normalize_referral_code(payload.removeprefix("ref_"))
         link = record_referral_visit(code, chat_id, user)
@@ -2822,6 +2905,7 @@ def build_xlsx_package(sheets):
 def build_active_projects_xlsx():
     columns = [
         ("id", "ID"),
+        ("listing_type", "Тип объекта"),
         ("title", "Лот"),
         ("category", "Категория"),
         ("city", "Город"),
@@ -2840,6 +2924,15 @@ def build_active_projects_xlsx():
         ("distress", "Distress"),
         ("original_price", "Original price, AED"),
         ("description", "Дополнительное описание"),
+        ("developer_name", "Застройщик"),
+        ("project_name", "Название проекта"),
+        ("studio_price_usd", "Мин. цена Studio, USD"),
+        ("one_bed_price_usd", "Мин. цена 1BR, USD"),
+        ("two_bed_price_usd", "Мин. цена 2BR, USD"),
+        ("three_bed_price_usd", "Мин. цена 3BR, USD"),
+        ("payment_plan", "Рассрочка"),
+        ("handover", "Ключи"),
+        ("developer_comment", "Комментарий застройщика"),
         ("created_at", "Создан"),
         ("updated_at", "Обновлён"),
     ]
@@ -2855,6 +2948,8 @@ def build_active_projects_xlsx():
             value = project[key]
             if key == "distress":
                 value = "Да" if value else "Нет"
+            elif key == "listing_type":
+                value = "От застройщика" if value == "developer" else "Вторичный рынок"
             row.append(value)
         rows.append(row)
 
@@ -3059,6 +3154,12 @@ def localized_project_value(value, lang="ru"):
 
 
 def project_display_name(project, lang="ru"):
+    if is_developer_project(project):
+        project_name = str(project["project_name"] or project["title"] or "").strip()
+        developer = str(project["developer_name"] or "").strip()
+        if lang == "en":
+            return f"{project_name} by {developer}" if developer else project_name
+        return f"{project_name} от {developer}" if developer else project_name
     rooms = localized_project_value(project["rooms"], lang)
     category = localized_project_value(project["category"], lang)
     building = str(project["building"] or "").strip()
@@ -3074,6 +3175,12 @@ def project_display_name(project, lang="ru"):
 
 def seo_description_for_project(project, lang="ru"):
     display_name = project_display_name(project, lang)
+    if is_developer_project(project):
+        min_price = developer_min_price(project)
+        price_text = f" from ${money(min_price)}" if min_price else ""
+        if lang == "en":
+            return f"Developer property in {project['city']}: {display_name}{price_text}. Payment plan, handover date, unit prices, and consultation from a licensed UAE broker."
+        return f"Недвижимость от застройщика в {project['city']}: {display_name}{price_text}. Цены, рассрочка, срок сдачи и консультация лицензированного брокера."
     if lang == "en":
         parts = [display_name, f"listed for {money(project['price'])} AED"]
     else:
@@ -3383,7 +3490,7 @@ def app_filter_options():
             """
         ).fetchall()
         rooms = conn.execute(
-            "select distinct rooms from projects where status='active' and rooms != '' order by rooms"
+            "select distinct rooms from projects where status='active' and listing_type != 'developer' and rooms != '' order by rooms"
         ).fetchall()
     districts_by_city = {}
     for row in locations:
@@ -3415,7 +3522,9 @@ def rooms_slug(value):
 
 
 def lot_slug(project):
-    building_slug = slugify(project["building"] or project["title"] or project["district"])
+    building_slug = slugify(project["project_name"] or project["building"] or project["title"] or project["district"])
+    if is_developer_project(project):
+        return f"{building_slug}-developer-{project['id']}"
     return f"{building_slug}-{rooms_slug(project['rooms'])}-{project['id']}"
 
 
@@ -3448,9 +3557,9 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
     where = ["status = 'active'"]
     params = []
     if search:
-        where.append("(title like ? or building like ? or city like ? or district like ? or category like ?)")
+        where.append("(title like ? or building like ? or city like ? or district like ? or category like ? or developer_name like ? or project_name like ?)")
         like = f"%{search}%"
-        params.extend([like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like])
     if city:
         where.append("city = ?")
         params.append(city)
@@ -3458,12 +3567,12 @@ def app_projects_page(query=None, message="", base_path="/app", lang="ru"):
         where.append("district = ?")
         params.append(district)
     if rooms:
-        where.append("rooms = ?")
+        where.append("listing_type != 'developer' and rooms = ?")
         params.append(rooms)
     if max_price:
         try:
             max_price_value = float(max_price.replace(" ", "").replace(",", "."))
-            where.append("price <= ?")
+            where.append("listing_type != 'developer' and price <= ?")
             params.append(max_price_value)
         except ValueError:
             pass
@@ -3628,16 +3737,25 @@ def app_project_card(project, lot_path="/app/lot", lang="ru"):
     deal_labels = "".join(f'<span class="{escape(css_class)}">{escape(label)}</span>' for label, css_class in deal_tags)
     photo_placeholder = "Photos coming soon" if lang == "en" else "Фото скоро появятся"
     href = f"{lot_path}?id={project['id']}" if lot_path else lot_public_path(project, lang)
+    developer = is_developer_project(project)
+    developer_badge = '<span class="developer-badge">🏗 ' + ('FROM DEVELOPER' if lang == 'en' else 'ОТ ЗАСТРОЙЩИКА') + '</span>' if developer else ''
+    min_price = developer_min_price(project) if developer else None
+    price_text = (f"{'From' if lang == 'en' else 'От'} ${money(min_price)}" if min_price else ("Price on request" if lang == "en" else "Цена по запросу")) if developer else f"{money(project['price'])} AED"
+    location_title = project["developer_name"] if developer else project["building"]
+    meta_items = (
+        [localized_project_value(project["category"], lang), project["handover"]]
+        if developer
+        else [localized_project_value(project["category"], lang), localized_project_value(project["rooms"], lang), project["area"]]
+    )
+    meta_html = "".join(f"<span>{escape(item)}</span>" for item in meta_items if item)
     return f"""
     <a class="lot-card" href="{escape(href)}">
-      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="{escape(display_name)}" loading="lazy">' if cover else escape(photo_placeholder)}</div>
+      <div class="lot-cover">{f'<img src="{escape(cover)}" alt="{escape(display_name)}" loading="lazy">' if cover else escape(photo_placeholder)}{developer_badge}</div>
       <div class="lot-body">
-        <div class="lot-title"><span>{escape(display_name)}</span><span class="lot-price">{money(project['price'])} AED</span></div>
-        <div>{escape(project['building'])}<br><span class="muted">{escape(project['city'])}, {escape(project['district'])}</span></div>
+        <div class="lot-title"><span>{escape(display_name)}</span><span class="lot-price">{escape(price_text)}</span></div>
+        <div>{escape(location_title)}<br><span class="muted">{escape(project['city'])}, {escape(project['district'])}</span></div>
         <div class="lot-meta">
-          <span>{escape(localized_project_value(project['category'], lang))}</span>
-          <span>{escape(localized_project_value(project['rooms'], lang))}</span>
-          <span>{escape(project['area'])}</span>
+          {meta_html}
           {deal_labels}
         </div>
       </div>
@@ -3856,12 +3974,147 @@ def bot_teaser_page():
 </html>"""
 
 
+def app_developer_project_page(project, message="", base_path="/app", lang="ru"):
+    lang = "en" if lang == "en" else "ru"
+    display_name = project_display_name(project, lang)
+    is_public_catalog = base_path in ("", "/ru", "/en")
+    root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
+    lead_path = f"{base_path}/lead" if base_path in ("/ru", "/en", "/app") else "/lead"
+    if base_path == "/app":
+        lot_path = f"{base_path}/lot?id={project['id']}"
+    elif base_path in ("/ru", "/en"):
+        lot_path = lot_public_path(project, lang)
+    else:
+        lot_path = f"/lot?id={project['id']}"
+    share_url = f"{PUBLIC_BASE_URL}{lot_path}" if PUBLIC_BASE_URL else lot_path
+    share_text = (
+        f"Developer property in the UAE: {display_name}"
+        if lang == "en"
+        else f"Недвижимость от застройщика в ОАЭ: {display_name}"
+    )
+    media = get_project_media(project["id"])
+    gallery_items = []
+    for index, item in enumerate(media):
+        src = app_media_path(item["file_name"])
+        if item["mime_type"].startswith("video/"):
+            gallery_items.append(f'<div class="gallery-item"><video src="{escape(src)}" controls playsinline aria-label="{escape(display_name)}"></video></div>')
+        else:
+            loading = "eager" if index == 0 else "lazy"
+            gallery_items.append(f'<div class="gallery-item"><img src="{escape(src)}" alt="{escape(display_name)} - {index + 1}" loading="{loading}"></div>')
+    labels = {
+        "category": "Category" if lang == "en" else "Категория",
+        "city": "City" if lang == "en" else "Город",
+        "district": "Area" if lang == "en" else "Район",
+        "developer": "Developer" if lang == "en" else "Застройщик",
+        "project": "Project" if lang == "en" else "Проект",
+        "furnishing": "Furnishing" if lang == "en" else "Меблировка",
+        "payment": "Payment plan" if lang == "en" else "Рассрочка",
+        "handover": "Handover" if lang == "en" else "Ключи",
+    }
+    facts = [
+        (labels["category"], localized_project_value(project["category"], lang)),
+        (labels["city"], project["city"]),
+        (labels["district"], project["district"]),
+        (labels["developer"], project["developer_name"]),
+        (labels["project"], project["project_name"]),
+        (labels["furnishing"], localized_project_value(project["furnishing"], lang)),
+    ]
+    for unit_type, price in developer_price_rows(project):
+        if price not in (None, ""):
+            label = f"Minimum {unit_type} price" if lang == "en" else f"Мин. цена {unit_type}"
+            facts.append((label, f"${money(price)}"))
+    facts.extend([(labels["payment"], project["payment_plan"]), (labels["handover"], project["handover"])])
+    fact_html = "".join(
+        f'<div class="fact"><small>{escape(label)}</small>{escape(value)}</div>'
+        for label, value in facts if value not in (None, "")
+    )
+    min_price = developer_min_price(project)
+    price_text = (
+        (f"From ${money(min_price)}" if lang == "en" else f"От ${money(min_price)}")
+        if min_price else ("Price on request" if lang == "en" else "Цена по запросу")
+    )
+    back_label = "All properties" if lang == "en" else "Вся недвижимость"
+    photo_placeholder = "Photo coming soon" if lang == "en" else "Фото скоро появится"
+    share_label = "Share project" if lang == "en" else "Поделиться проектом"
+    details_label = "Request project details" if lang == "en" else "Хочу узнать подробнее"
+    name_placeholder = "Your name" if lang == "en" else "Ваше имя"
+    contact_placeholder = "Phone, WhatsApp, or Telegram" if lang == "en" else "Телефон, WhatsApp или Telegram"
+    comment_placeholder = "Comment" if lang == "en" else "Комментарий"
+    raw_comment = str(project["developer_comment"] or "").strip()
+    visible_comment = "" if lang == "en" and re.search(r"[А-Яа-яЁё]", raw_comment) else raw_comment
+    language_switch = ""
+    alternates = {}
+    if is_public_catalog:
+        alternates = lot_alternates(project)
+        language_switch = f"""
+        <div class="seo-topbar"><nav class="breadcrumbs"><a href="{escape(root_path)}">Below Market UAE</a></nav>
+          <div class="language-switch" aria-label="Language switch">
+            {f'<span>RU</span><a href="{escape(lot_public_path(project, "en"))}">EN</a>' if lang == 'ru' else f'<a href="{escape(lot_public_path(project, "ru"))}">RU</a><span>EN</span>'}
+          </div>
+        </div>"""
+    with db() as conn:
+        related_projects = conn.execute(
+            "select * from projects where status='active' and id != ? order by case when district = ? then 0 else 1 end, updated_at desc limit 3",
+            (project["id"], project["district"]),
+        ).fetchall()
+    related_cards = "".join(app_project_card(item, None, lang=lang) for item in related_projects)
+    context_heading = "About this developer project" if lang == "en" else "О проекте от застройщика"
+    context_text = (
+        f"{project['project_name']} is a development by {project['developer_name']} in {project['district']}, {project['city']}. Prices, availability, payment plans, and handover dates can change; request the current offer before making a decision."
+        if lang == "en"
+        else f"{project['project_name']} — проект застройщика {project['developer_name']} в районе {project['district']}, {project['city']}. Цены, доступность, условия рассрочки и сроки сдачи могут меняться; перед покупкой запросите актуальное предложение."
+    )
+    content = f"""
+    {language_switch}
+    <a class="back-link" href="{escape(root_path)}">← {escape(back_label)}</a>
+    <section class="lot-detail">
+      <div class="gallery">{''.join(gallery_items) or f'<div class="gallery-item">{escape(photo_placeholder)}</div>'}</div>
+      <aside class="detail-panel">
+        <div class="developer-badge">🏗 {'FROM DEVELOPER' if lang == 'en' else 'ОТ ЗАСТРОЙЩИКА'}</div>
+        <h1>{escape(display_name)}</h1>
+        <div class="detail-price">{escape(price_text)}</div>
+        <div class="facts">{fact_html}</div>
+        {f'<p>{escape(visible_comment)}</p>' if visible_comment else ''}
+        <button class="app-button secondary" type="button" data-share-lot="1" data-share-url="{escape(share_url)}" data-share-text="{escape(share_text)}">↗️ {escape(share_label)}</button>
+        <form class="lead-form" method="post" action="{escape(lead_path)}">
+          <input type="hidden" name="project_id" value="{project['id']}"><input type="hidden" name="tg_user_json" value=""><input type="hidden" name="catalog_session_id" value=""><input type="hidden" name="traffic_attribution" value="">
+          <input name="name" placeholder="{escape(name_placeholder)}"><input name="contact" required placeholder="{escape(contact_placeholder)}"><textarea name="message" placeholder="{escape(comment_placeholder)}"></textarea>
+          <button>💬 {escape(details_label)}</button>
+        </form>
+      </aside>
+    </section>
+    <section class="lot-seo-copy"><h2>{escape(context_heading)}</h2><p>{escape(context_text)}</p></section>
+    {f'<section class="related-lots"><h2>{"Similar properties" if lang == "en" else "Похожая недвижимость"}</h2><div class="lot-grid">{related_cards}</div></section>' if related_cards else ''}
+    """
+    canonical_path = lot_public_path(project, lang) if base_path in ("/ru", "/en") else f"/lot?id={project['id']}"
+    canonical_url = public_url(canonical_path)
+    description = seo_description_for_project(project, lang)
+    image_urls = [public_url(app_media_path(item["file_name"])) for item in media if item["mime_type"].startswith("image/")]
+    title = f"{display_name} | Below Market UAE"
+    property_entity = {
+        "@type": "Accommodation", "name": display_name, "description": description,
+        "address": {"@type": "PostalAddress", "addressLocality": project["city"], "addressRegion": project["district"], "addressCountry": "AE"},
+        "offers": {"@type": "AggregateOffer", "lowPrice": str(min_price or 0), "priceCurrency": "USD", "availability": "https://schema.org/InStock", "url": canonical_url},
+    }
+    structured_data = [{
+        "@context": "https://schema.org", "@type": "RealEstateListing", "@id": f"{canonical_url}#listing", "url": canonical_url,
+        "name": display_name, "description": description, "datePosted": (project["created_at"] or "")[:10],
+        "dateModified": (project["updated_at"] or project["created_at"] or "")[:10], "inLanguage": lang, "image": image_urls,
+        "mainEntity": property_entity, "publisher": {"@type": "RealEstateAgent", "name": "Below Market UAE", "url": public_url("/")},
+    }]
+    return app_layout(title, content, message, catalog_event="catalog_lot_view", project_id=project["id"], project=project,
+                      description=description, canonical_url=canonical_url, og_image=project_cover(project["id"]),
+                      noindex=not is_public_catalog, lang=lang, alternate_urls=alternates, structured_data=structured_data)
+
+
 def app_project_page(project_id, message="", base_path="/app", lang="ru"):
     lang = "en" if lang == "en" else "ru"
     project = get_project(project_id)
     if not project or project["status"] != "active":
         fallback_message = "Lot not found or no longer active." if lang == "en" else "Лот не найден или больше не актуален."
         return app_projects_page(message=fallback_message, base_path=base_path, lang=lang)
+    if is_developer_project(project):
+        return app_developer_project_page(project, message=message, base_path=base_path, lang=lang)
     display_name = project_display_name(project, lang)
     is_public_catalog = base_path in ("", "/ru", "/en")
     root_path = f"{base_path}/" if base_path in ("/ru", "/en") else (base_path or "/")
@@ -5925,7 +6178,7 @@ def referral_link_url(code):
     return f"https://t.me/{BOT_USERNAME}?start=ref_{code}"
 
 
-def record_referral_visit(code, chat_id, user):
+def record_referral_visit(code, chat_id, user, yclid="", diagnostic=False):
     code = normalize_referral_code(code)
     if not code:
         return None
@@ -5934,30 +6187,37 @@ def record_referral_visit(code, chat_id, user):
             "select * from referral_links where lower(code) = lower(?)",
             (code,),
         ).fetchone()
-        conn.execute(
-            """
-            insert into referral_visits(referral_link_id, referral_code, chat_id, username, name, created_at)
-            values (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                link["id"] if link else None,
-                code,
-                chat_id,
-                user.get("username") if user else None,
-                lead_name(user) if user else str(chat_id),
-                iso_now(),
-            ),
-        )
-    campaign = link["name"] if link else code
-    source = (link["source"] or "Не указан") if link else "Не указан"
+        if not diagnostic:
+            conn.execute(
+                """
+                insert into referral_visits(referral_link_id, referral_code, chat_id, username, name, created_at)
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link["id"] if link else None,
+                    code,
+                    chat_id,
+                    user.get("username") if user else None,
+                    lead_name(user) if user else str(chat_id),
+                    iso_now(),
+                ),
+            )
+    campaign = link["name"] if link else ("Не указана" if yclid else code)
+    fallback_source = "Яндекс Директ" if yclid or diagnostic else "Не указан"
+    source = (link["source"] or fallback_source) if link else fallback_source
     lines = [
-        "Переход по реферальной ссылке",
+        "Запуск бота из Яндекс Директа" if yclid else "Переход по реферальной ссылке",
         f"Кампания: {html.escape(str(campaign))}",
         f"Источник: {html.escape(str(source))}",
         f"Код: {html.escape(code)}",
         f"Клиент: {html.escape(lead_name(user) if user else str(chat_id))}",
         f"Telegram: @{html.escape(user.get('username'))}" if user and user.get("username") else f"Telegram ID: {chat_id}",
     ]
+    if yclid:
+        lines.append(f"ID клика Яндекса: {html.escape(yclid)}")
+    if diagnostic:
+        lines[0] = "ТЕСТ — проверка рекламной ссылки"
+        lines.append("Реального рекламного клика нет. Тестовое событие bot_start_test поставлено в очередь Метрики.")
     threading.Thread(target=notify_admin, args=("\n".join(lines),), daemon=True).start()
     return link
 
@@ -6162,6 +6422,10 @@ button.secondary, .button.secondary { background:#eef2ef; color:var(--text); bor
 button.danger, .button.danger { background:var(--danger); color:#fff; }
 form.inline { display:inline; }
 .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+.lot-type-fields[hidden] { display:none; }
+.lot-type-fields { margin-top:20px; }
+.lot-type-fields h2 { margin:0 0 14px; }
+.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:100%; padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:900; text-transform:uppercase; }
 label { display:grid; gap:6px; color:var(--muted); font-weight:700; font-size:12px; }
 input, select, textarea { width:100%; border:1px solid var(--line); border-radius:7px; padding:10px 11px; background:#fff; color:var(--text); font:inherit; }
 textarea { min-height:110px; resize:vertical; }
@@ -6261,8 +6525,10 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .app-button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
 .lot-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
 .lot-card { display:grid; overflow:hidden; background:var(--card); border:1px solid var(--line); border-radius:8px; text-decoration:none; min-height:100%; }
-.lot-cover { aspect-ratio:4/3; background:#e7ebe7; overflow:hidden; display:grid; place-items:center; color:var(--muted); }
+.lot-cover { position:relative; aspect-ratio:4/3; background:#e7ebe7; overflow:hidden; display:grid; place-items:center; color:var(--muted); }
 .lot-cover img { width:100%; height:100%; object-fit:cover; display:block; }
+.developer-badge { display:inline-flex; align-items:center; width:max-content; max-width:calc(100% - 24px); padding:7px 10px; border-radius:6px; background:#f4b942; color:#17221d; font-size:12px; line-height:1.1; font-weight:900; text-transform:uppercase; }
+.lot-cover .developer-badge { position:absolute; z-index:1; top:10px; left:10px; box-shadow:0 2px 8px rgba(23,34,29,.2); }
 .lot-body { padding:13px; display:grid; gap:8px; }
 .lot-title { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; font-weight:850; font-size:16px; }
 .lot-price { color:var(--accent); white-space:nowrap; }
@@ -6273,6 +6539,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .lot-detail { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(320px,.65fr); gap:18px; align-items:start; }
 .gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .gallery-item { border-radius:8px; overflow:hidden; background:#e7ebe7; aspect-ratio:4/3; }
+.gallery-item:only-child { grid-column:1 / -1; }
 .gallery-item img, .gallery-item video { width:100%; height:100%; object-fit:cover; display:block; }
 .detail-panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:14px; position:sticky; top:14px; }
 .detail-panel h1 { margin:0; font-size:26px; line-height:1.12; }
@@ -6286,6 +6553,7 @@ button, .app-button { border:0; border-radius:7px; padding:11px 14px; background
 .fact.deal-tag { background:#e7f2ec; border-color:#bcd8c9; color:#1f6b4d; }
 .fact.distress-tag { background:#fff1df; border-color:#e6bd80; color:#915515; }
 .fact small { display:block; color:var(--muted); font-weight:700; margin-bottom:2px; }
+.lot-type-fields[hidden] { display:none; }
 .lead-form { display:grid; gap:10px; }
 .lead-form textarea { min-height:92px; resize:vertical; }
 .empty-state { padding:24px; background:#fff; border:1px solid var(--line); border-radius:8px; color:var(--muted); }
@@ -6388,12 +6656,19 @@ def dashboard(message=""):
     s = stats()
     with db() as conn:
         projects = conn.execute("select * from projects order by created_at desc").fetchall()
-    rows = "".join(
-        f"""
+    rows = []
+    for p in projects:
+        developer = is_developer_project(p)
+        badge = '<span class="developer-badge">🏗 ОТ ЗАСТРОЙЩИКА</span><br>' if developer else ""
+        location_name = p["developer_name"] if developer else p["building"]
+        units = "Несколько типов" if developer else p["rooms"]
+        min_price = developer_min_price(p) if developer else None
+        price = (f"От ${money(min_price)}" if min_price else "По запросу") if developer else f"{money(p['price'])} AED"
+        rows.append(f"""
         <tr>
-          <td><strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['city'])}, {escape(p['district'])}, {escape(p['building'])}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
-          <td>{escape(p['rooms'])}</td>
-          <td>{money(p['price'])} AED</td>
+          <td>{badge}<strong>{escape(p['title'])}</strong><br><span class="muted">{escape(p['city'])}, {escape(p['district'])}, {escape(location_name)}</span>{f'<br><span class="muted">От кого: {escape(p["source_from"])}</span>' if p['source_from'] else ''}</td>
+          <td>{escape(units)}</td>
+          <td>{escape(price)}</td>
           <td><span class="status {escape(p['status'])}">{escape(p['status'])}</span></td>
           <td class="actions">
             <a class="button secondary" href="/project/edit?id={p['id']}">Редактировать</a>
@@ -6402,9 +6677,8 @@ def dashboard(message=""):
             <form class="inline" method="post" action="/project/delete"><input type="hidden" name="id" value="{p['id']}"><button class="danger">Удалить</button></form>
           </td>
         </tr>
-        """
-        for p in projects
-    )
+        """)
+    rows = "".join(rows)
     content = f"""
     <section class="grid">
       <div class="metric"><strong>{s['active']}</strong><span>актуальных объектов</span></div>
@@ -7335,33 +7609,82 @@ def project_form(project=None, message=""):
     p = dict(project) if project else {}
     action = "/project/update" if project else "/project/create"
     hidden = f'<input type="hidden" name="id" value="{project["id"]}">' if project else ""
+    listing_type = p.get("listing_type") or "resale"
     content = f"""
-    <form class="panel" method="post" action="{action}" enctype="multipart/form-data">
+    <form class="panel" id="project-form" method="post" action="{action}" enctype="multipart/form-data">
       {hidden}
       <div class="form-grid">
-        <label>Лот<input name="title" required value="{escape(p.get('title'))}"></label>
-        <label>Категория<input name="category" required value="{escape(p.get('category'))}" placeholder="Apartment / Villa"></label>
-        <label>Город<input name="city" required value="{escape(p.get('city') or 'Dubai')}" placeholder="Dubai"></label>
-        <label>Район<input name="district" required value="{escape(p.get('district'))}"></label>
-        <label>Название здания<input name="building" required value="{escape(p.get('building'))}"></label>
-        <label>Комнаты<input name="rooms" required value="{escape(p.get('rooms'))}" placeholder="1BR / Studio"></label>
-        <label>Санузлы<input name="bathrooms" value="{escape(p.get('bathrooms'))}"></label>
-        <label>Этаж<select name="floor_level" required><option {selected(p.get('floor_level'),'Высокий')}>Высокий</option><option {selected(p.get('floor_level'),'Низкий')}>Низкий</option><option {selected(p.get('floor_level'),'Средний')}>Средний</option></select></label>
-        <label>Парковка<input name="parking" value="{escape(p.get('parking'))}" placeholder="1 место / нет данных"></label>
-        <label>Статус<select name="availability" required><option {selected(p.get('availability'),'Свободно')}>Свободно</option><option {selected(p.get('availability'),'В аренде')}>В аренде</option></select></label>
-        <label>Меблировка<input name="furnishing" value="{escape(p.get('furnishing'))}" placeholder="Furnished / Unfurnished"></label>
-        <label>Балкон<input name="balcony" value="{escape(p.get('balcony'))}" placeholder="Есть / нет данных"></label>
-        <label>Площадь<input name="area" required value="{escape(p.get('area'))}" placeholder="850 sqft"></label>
-        <label>Цена, AED<input type="number" step="1" name="price" required value="{escape(p.get('price'))}"></label>
-        <label>Средняя цена рынка, AED<input type="number" step="1" name="market_price" value="{escape(p.get('market_price'))}"></label>
-        <label>Original price, AED<input type="number" step="1" name="original_price" value="{escape(p.get('original_price'))}"></label>
-        <label>Distress<select name="distress"><option value="0" {selected(str(p.get('distress',0)),'0')}>Нет</option><option value="1" {selected(str(p.get('distress',0)),'1')}>Да</option></select></label>
-        <label>Фото/видео<input type="file" name="media" multiple accept="image/*,video/*"></label>
-        <label class="wide">От кого<input name="source_from" value="{escape(p.get('source_from'))}" placeholder="Например: агент, собственник, партнёр"></label>
-        <label class="wide">Дополнительное описание<textarea name="description">{escape(p.get('description'))}</textarea></label>
+        <label>Тип объекта
+          <select name="listing_type" id="listing-type">
+            <option value="resale" {selected(listing_type, 'resale')}>Вторичный рынок</option>
+            <option value="developer" {selected(listing_type, 'developer')}>От застройщика</option>
+          </select>
+        </label>
+      </div>
+      <div class="lot-type-fields" data-listing-fields="resale">
+        <h2>Данные лота</h2>
+        <div class="form-grid">
+          <label>Лот<input name="title" required value="{escape(p.get('title'))}"></label>
+          <label>Категория<input name="category" required value="{escape(p.get('category'))}" placeholder="Apartment / Villa"></label>
+          <label>Город<input name="city" required value="{escape(p.get('city') or 'Dubai')}" placeholder="Dubai"></label>
+          <label>Район<input name="district" required value="{escape(p.get('district'))}"></label>
+          <label>Название здания<input name="building" required value="{escape(p.get('building'))}"></label>
+          <label>Комнаты<input name="rooms" required value="{escape(p.get('rooms'))}" placeholder="1BR / Studio"></label>
+          <label>Санузлы<input name="bathrooms" value="{escape(p.get('bathrooms'))}"></label>
+          <label>Этаж<select name="floor_level" required><option {selected(p.get('floor_level'),'Высокий')}>Высокий</option><option {selected(p.get('floor_level'),'Низкий')}>Низкий</option><option {selected(p.get('floor_level'),'Средний')}>Средний</option></select></label>
+          <label>Парковка<input name="parking" value="{escape(p.get('parking'))}" placeholder="1 место / нет данных"></label>
+          <label>Статус<select name="availability" required><option {selected(p.get('availability'),'Свободно')}>Свободно</option><option {selected(p.get('availability'),'В аренде')}>В аренде</option></select></label>
+          <label>Меблировка<input name="furnishing" value="{escape(p.get('furnishing'))}" placeholder="Furnished / Unfurnished"></label>
+          <label>Балкон<input name="balcony" value="{escape(p.get('balcony'))}" placeholder="Есть / нет данных"></label>
+          <label>Площадь<input name="area" required value="{escape(p.get('area'))}" placeholder="850 sqft"></label>
+          <label>Цена, AED<input type="number" step="1" name="price" required value="{escape(p.get('price'))}"></label>
+          <label>Средняя цена рынка, AED<input type="number" step="1" name="market_price" value="{escape(p.get('market_price'))}"></label>
+          <label>Original price, AED<input type="number" step="1" name="original_price" value="{escape(p.get('original_price'))}"></label>
+          <label>Distress<select name="distress"><option value="0" {selected(str(p.get('distress',0)),'0')}>Нет</option><option value="1" {selected(str(p.get('distress',0)),'1')}>Да</option></select></label>
+          <label class="wide">От кого<input name="source_from" value="{escape(p.get('source_from'))}" placeholder="Например: агент, собственник, партнёр"></label>
+          <label class="wide">Дополнительное описание<textarea name="description">{escape(p.get('description'))}</textarea></label>
+        </div>
+      </div>
+      <div class="lot-type-fields" data-listing-fields="developer">
+        <h2><span class="developer-badge">🏗 От застройщика</span></h2>
+        <div class="form-grid">
+          <label>Категория<select name="category" required><option value="Apartment" {selected(p.get('category'),'Apartment')}>Апартаменты</option><option value="Villa" {selected(p.get('category'),'Villa')}>Вилла</option><option value="Townhouse" {selected(p.get('category'),'Townhouse')}>Таунхаус</option></select></label>
+          <label>Город<input name="city" required value="{escape(p.get('city') or 'Dubai')}" placeholder="Dubai"></label>
+          <label>Район<input name="district" required value="{escape(p.get('district'))}"></label>
+          <label>Застройщик<input name="developer_name" required value="{escape(p.get('developer_name'))}"></label>
+          <label>Название проекта<input name="project_name" required value="{escape(p.get('project_name') or (p.get('title') if listing_type == 'developer' else ''))}"></label>
+          <label>Мебировка<input name="furnishing" value="{escape(p.get('furnishing'))}" placeholder="Furnished / Unfurnished"></label>
+          <label>Минимальная цена студии, $<input type="number" min="0" step="1" name="studio_price_usd" value="{escape(p.get('studio_price_usd'))}"></label>
+          <label>Минимальная цена 1BR, $<input type="number" min="0" step="1" name="one_bed_price_usd" value="{escape(p.get('one_bed_price_usd'))}"></label>
+          <label>Минимальная цена 2BR, $<input type="number" min="0" step="1" name="two_bed_price_usd" value="{escape(p.get('two_bed_price_usd'))}"></label>
+          <label>Минимальная цена 3BR, $<input type="number" min="0" step="1" name="three_bed_price_usd" value="{escape(p.get('three_bed_price_usd'))}"></label>
+          <label class="wide">Рассрочка<input name="payment_plan" value="{escape(p.get('payment_plan'))}" placeholder="Например: 20/50/30"></label>
+          <label>Ключи (квартал-год)<input name="handover" value="{escape(p.get('handover'))}" placeholder="Q4 2028"></label>
+          <label class="wide">Комментарий<textarea name="developer_comment">{escape(p.get('developer_comment'))}</textarea></label>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label>Фото/видео<input type="file" name="media" {'multiple' if listing_type != 'developer' else ''} accept="image/*,video/*"></label>
       </div>
       <p><button>{'Сохранить' if project else 'Добавить объект'}</button></p>
     </form>
+    <script>
+    (function() {{
+      var type = document.getElementById('listing-type');
+      var groups = Array.from(document.querySelectorAll('[data-listing-fields]'));
+      function syncFields() {{
+        groups.forEach(function(group) {{
+          var active = group.dataset.listingFields === type.value;
+          group.hidden = !active;
+          group.querySelectorAll('input, select, textarea').forEach(function(field) {{ field.disabled = !active; }});
+        }});
+        var media = document.querySelector('input[name="media"]');
+        if (media) media.multiple = type.value !== 'developer';
+      }}
+      type.addEventListener('change', syncFields);
+      syncFields();
+    }})();
+    </script>
     """
     if project:
         media = get_project_media(project["id"])
@@ -8320,28 +8643,80 @@ def login_page(message=""):
 
 
 def save_project(form, project_id=None):
-    values = {
-        "title": form_value(form, "title"),
-        "category": form_value(form, "category"),
-        "city": form_value(form, "city").strip() or "Dubai",
-        "district": form_value(form, "district"),
-        "building": form_value(form, "building"),
-        "rooms": form_value(form, "rooms"),
-        "bathrooms": form_value(form, "bathrooms"),
-        "floor_level": form_value(form, "floor_level"),
-        "parking": form_value(form, "parking"),
-        "availability": form_value(form, "availability"),
-        "furnishing": form_value(form, "furnishing"),
-        "balcony": form_value(form, "balcony"),
-        "area": form_value(form, "area"),
-        "price": form_value(form, "price"),
-        "market_price": form_value(form, "market_price") or None,
-        "distress": int(form_value(form, "distress", "0") or 0),
-        "original_price": form_value(form, "original_price") or None,
-        "source_from": form_value(form, "source_from"),
-        "description": form_value(form, "description"),
-        "updated_at": iso_now(),
-    }
+    listing_type = form_value(form, "listing_type", "resale")
+    if listing_type == "developer":
+        project_name = form_value(form, "project_name").strip()
+        values = {
+            "listing_type": "developer",
+            "title": project_name,
+            "category": form_value(form, "category"),
+            "city": form_value(form, "city").strip() or "Dubai",
+            "district": form_value(form, "district"),
+            "building": project_name,
+            "rooms": "Various",
+            "bathrooms": "",
+            "floor_level": "—",
+            "parking": "",
+            "availability": "От застройщика",
+            "furnishing": form_value(form, "furnishing"),
+            "balcony": "",
+            "area": "По запросу",
+            "price": 0,
+            "market_price": None,
+            "distress": 0,
+            "original_price": None,
+            "source_from": "",
+            "description": "",
+            "developer_name": form_value(form, "developer_name"),
+            "project_name": project_name,
+            "studio_price_usd": form_value(form, "studio_price_usd") or None,
+            "one_bed_price_usd": form_value(form, "one_bed_price_usd") or None,
+            "two_bed_price_usd": form_value(form, "two_bed_price_usd") or None,
+            "three_bed_price_usd": form_value(form, "three_bed_price_usd") or None,
+            "payment_plan": form_value(form, "payment_plan"),
+            "handover": form_value(form, "handover"),
+            "developer_comment": form_value(form, "developer_comment"),
+            "updated_at": iso_now(),
+        }
+        prices = [
+            values["studio_price_usd"], values["one_bed_price_usd"],
+            values["two_bed_price_usd"], values["three_bed_price_usd"],
+        ]
+        numeric_prices = [float(value) for value in prices if value not in (None, "")]
+        values["price"] = min(numeric_prices) if numeric_prices else 0
+    else:
+        values = {
+            "listing_type": "resale",
+            "title": form_value(form, "title"),
+            "category": form_value(form, "category"),
+            "city": form_value(form, "city").strip() or "Dubai",
+            "district": form_value(form, "district"),
+            "building": form_value(form, "building"),
+            "rooms": form_value(form, "rooms"),
+            "bathrooms": form_value(form, "bathrooms"),
+            "floor_level": form_value(form, "floor_level"),
+            "parking": form_value(form, "parking"),
+            "availability": form_value(form, "availability"),
+            "furnishing": form_value(form, "furnishing"),
+            "balcony": form_value(form, "balcony"),
+            "area": form_value(form, "area"),
+            "price": form_value(form, "price"),
+            "market_price": form_value(form, "market_price") or None,
+            "distress": int(form_value(form, "distress", "0") or 0),
+            "original_price": form_value(form, "original_price") or None,
+            "source_from": form_value(form, "source_from"),
+            "description": form_value(form, "description"),
+            "developer_name": None,
+            "project_name": None,
+            "studio_price_usd": None,
+            "one_bed_price_usd": None,
+            "two_bed_price_usd": None,
+            "three_bed_price_usd": None,
+            "payment_plan": None,
+            "handover": None,
+            "developer_comment": None,
+            "updated_at": iso_now(),
+        }
     with db() as conn:
         if project_id:
             values["id"] = project_id
@@ -8351,7 +8726,12 @@ def save_project(form, project_id=None):
                   rooms=:rooms, bathrooms=:bathrooms, floor_level=:floor_level, parking=:parking,
                   availability=:availability, furnishing=:furnishing, balcony=:balcony, area=:area,
                   price=:price, market_price=:market_price, distress=:distress, original_price=:original_price,
-                  source_from=:source_from, description=:description, updated_at=:updated_at
+                  source_from=:source_from, description=:description, listing_type=:listing_type,
+                  developer_name=:developer_name, project_name=:project_name,
+                  studio_price_usd=:studio_price_usd, one_bed_price_usd=:one_bed_price_usd,
+                  two_bed_price_usd=:two_bed_price_usd, three_bed_price_usd=:three_bed_price_usd,
+                  payment_plan=:payment_plan, handover=:handover, developer_comment=:developer_comment,
+                  updated_at=:updated_at
                 where id=:id
                 """,
                 values,
@@ -8363,10 +8743,15 @@ def save_project(form, project_id=None):
                 """
                 insert into projects(title, category, city, district, building, rooms, bathrooms, floor_level,
                   parking, availability, furnishing, balcony, area, price, market_price, distress,
-                  original_price, source_from, description, created_at, updated_at)
+                  original_price, source_from, description, listing_type, developer_name, project_name,
+                  studio_price_usd, one_bed_price_usd, two_bed_price_usd, three_bed_price_usd,
+                  payment_plan, handover, developer_comment, created_at, updated_at)
                 values(:title, :category, :city, :district, :building, :rooms, :bathrooms, :floor_level,
                   :parking, :availability, :furnishing, :balcony, :area, :price, :market_price,
-                  :distress, :original_price, :source_from, :description, :created_at, :updated_at)
+                  :distress, :original_price, :source_from, :description, :listing_type,
+                  :developer_name, :project_name, :studio_price_usd, :one_bed_price_usd,
+                  :two_bed_price_usd, :three_bed_price_usd, :payment_plan, :handover,
+                  :developer_comment, :created_at, :updated_at)
                 """,
                 values,
             )
@@ -9205,7 +9590,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
+    BOT_METRIKA.initialize()
     stop_event = threading.Event()
+    analytics_thread = threading.Thread(target=BOT_METRIKA.run, args=(stop_event,), daemon=True)
+    analytics_thread.start()
     menu_thread = threading.Thread(target=configure_bot_menu_button, daemon=True)
     bot_thread = threading.Thread(target=bot_loop, args=(stop_event,), daemon=True)
     scheduler_thread = threading.Thread(target=scheduler_loop, args=(stop_event,), daemon=True)
